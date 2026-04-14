@@ -1,0 +1,15 @@
+[package]
+name = "plume-search"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+plume-core = { workspace = true }
+plume-index = { workspace = true }
+plume-cache = { workspace = true }
+plume-encoder = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }

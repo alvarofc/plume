@@ -1,0 +1,17 @@
+[package]
+name = "plume-encoder"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+onnx = ["dep:ort", "dep:tokenizers"]
+
+[dependencies]
+plume-core = { workspace = true }
+ort = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+ndarray = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

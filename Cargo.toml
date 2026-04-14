@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/plume-core",
+    "crates/plume-encoder",
+    "crates/plume-cache",
+    "crates/plume-index",
+    "crates/plume-search",
+    "crates/plume-api",
+    "bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Internal crates
+plume-core = { path = "crates/plume-core" }
+plume-encoder = { path = "crates/plume-encoder" }
+plume-cache = { path = "crates/plume-cache" }
+plume-index = { path = "crates/plume-index" }
+plume-search = { path = "crates/plume-search" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Web framework
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+bincode = "2"
+
+# Storage
+lancedb = { version = "0.27", features = ["aws", "gcs"] }
+arrow = { version = "57", features = ["json"] }
+arrow-array = "57"
+arrow-schema = "57"
+arrow-buffer = "57"
+
+# Object store
+object_store = { version = "0.11", features = ["aws", "gcp"] }
+
+# Cache
+foyer = "0.22"
+
+# ONNX
+ort = "2.0.0-rc.12"
+tokenizers = "0.21"
+ndarray = "0.16"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Misc
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

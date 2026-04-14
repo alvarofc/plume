@@ -1,0 +1,15 @@
+[package]
+name = "plume-cache"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+plume-core = { workspace = true }
+foyer = { workspace = true }
+bincode = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+metrics = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }

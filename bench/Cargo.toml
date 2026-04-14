@@ -1,0 +1,21 @@
+[package]
+name = "plume-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bench-latency"
+path = "bench_latency.rs"
+
+[dependencies]
+plume-core = { path = "../crates/plume-core" }
+plume-encoder = { path = "../crates/plume-encoder" }
+plume-cache = { path = "../crates/plume-cache" }
+plume-index = { path = "../crates/plume-index" }
+plume-search = { path = "../crates/plume-search" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
