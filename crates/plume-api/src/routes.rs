@@ -7,7 +7,10 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use plume_core::types::{IndexResponse, QueryRequest, UpsertRequest, UpsertResponse};
+use plume_core::types::{
+    validate_namespace, IndexResponse, QueryRequest, UpsertRequest, UpsertResponse,
+    MAX_K, MAX_ROWS_PER_UPSERT, MAX_TEXT_LENGTH,
+};
 use serde_json::json;
 use tracing::{error, info};
 
@@ -41,13 +44,8 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
          plume_cache_hits_total {}\n\
          # HELP plume_cache_misses_total Total cache misses\n\
          # TYPE plume_cache_misses_total counter\n\
-         plume_cache_misses_total {}\n\
-         # HELP plume_object_requests_saved_total S3 requests saved by cache\n\
-         # TYPE plume_object_requests_saved_total counter\n\
-         plume_object_requests_saved_total {}\n",
-        stats.hits,
-        stats.misses,
-        stats.hits,
+         plume_cache_misses_total {}\n",
+        stats.hits, stats.misses,
     );
 
     (
@@ -63,8 +61,25 @@ async fn upsert(
     Path(ns): Path<String>,
     Json(req): Json<UpsertRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
+
     if req.rows.is_empty() {
         return Err(AppError::bad_request("rows must not be empty"));
+    }
+    if req.rows.len() > MAX_ROWS_PER_UPSERT {
+        return Err(AppError::bad_request(&format!(
+            "too many rows ({}, max {MAX_ROWS_PER_UPSERT})",
+            req.rows.len()
+        )));
+    }
+    for doc in &req.rows {
+        if doc.text.len() > MAX_TEXT_LENGTH {
+            return Err(AppError::bad_request(&format!(
+                "document '{}' text too long ({} bytes, max {MAX_TEXT_LENGTH})",
+                doc.id,
+                doc.text.len()
+            )));
+        }
     }
 
     let table = state.index.namespace(&ns).await?;
@@ -91,7 +106,22 @@ async fn query(
     Path(ns): Path<String>,
     Json(req): Json<QueryRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let table = state.index.namespace(&ns).await?;
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
+
+    if req.k == 0 || req.k > MAX_K {
+        return Err(AppError::bad_request(&format!(
+            "k must be between 1 and {MAX_K}, got {}",
+            req.k
+        )));
+    }
+    if req.query.is_empty() {
+        return Err(AppError::bad_request("query must not be empty"));
+    }
+    if req.query.len() > MAX_TEXT_LENGTH {
+        return Err(AppError::bad_request("query text too long"));
+    }
+
+    let table = state.index.get_namespace(&ns).await?;
 
     let query_vectors = state.encoder.encode_single(&req.query)?;
 
@@ -108,7 +138,8 @@ async fn build_index(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let table = state.index.namespace(&ns).await?;
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
+    let table = state.index.get_namespace(&ns).await?;
 
     tokio::spawn(async move {
         if let Err(e) = table.build_vector_index().await {
@@ -129,7 +160,8 @@ async fn build_fts_index(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let table = state.index.namespace(&ns).await?;
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
+    let table = state.index.get_namespace(&ns).await?;
 
     tokio::spawn(async move {
         if let Err(e) = table.build_fts_index().await {
@@ -150,8 +182,9 @@ async fn warmup(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
     // Pre-warm: run a dummy scan to pull data into OS page cache / LanceDB cache
-    let table = state.index.namespace(&ns).await?;
+    let table = state.index.get_namespace(&ns).await?;
     let count = table.count().await?;
     info!(namespace = %ns, docs = count, "warmup complete");
     Ok(Json(json!({"status": "ok", "namespace": ns, "docs": count})))
@@ -162,8 +195,9 @@ async fn drop_namespace(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
     state.index.drop_namespace(&ns).await?;
-    state.cache.invalidate(&ns);
+    state.cache.remove_namespace(&ns);
 
     Ok(Json(json!({"status": "dropped", "namespace": ns})))
 }

@@ -45,8 +45,11 @@ pub fn build_record_batch(
 
     let meta_strings: Vec<String> = metadata
         .iter()
-        .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string()))
-        .collect();
+        .map(|m| {
+            serde_json::to_string(m)
+                .map_err(|e| PlumeError::Index(format!("metadata serialization failed: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let meta_array = LargeStringArray::from(meta_strings);
 
     RecordBatch::try_new(

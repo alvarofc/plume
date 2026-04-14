@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = PlumeConfig::from_env_or_default();
+    let config = PlumeConfig::from_env_or_default()?;
     info!("starting Plume v{}", env!("CARGO_PKG_VERSION"));
 
     let index_manager = IndexManager::connect(&config.storage).await?;

@@ -37,7 +37,7 @@ impl IndexManager {
         })
     }
 
-    /// Get or create a namespace table.
+    /// Get or create a namespace table (for write paths like upsert).
     pub async fn namespace(&self, name: &str) -> Result<Arc<NamespaceTable>, PlumeError> {
         {
             let tables = self.tables.read().await;
@@ -53,6 +53,28 @@ impl IndexManager {
         tables.insert(name.to_string(), Arc::clone(&ns_table));
 
         Ok(ns_table)
+    }
+
+    /// Get an existing namespace table (for read paths like query).
+    /// Returns NamespaceNotFound if the namespace doesn't exist.
+    pub async fn get_namespace(&self, name: &str) -> Result<Arc<NamespaceTable>, PlumeError> {
+        {
+            let tables = self.tables.read().await;
+            if let Some(table) = tables.get(name) {
+                return Ok(Arc::clone(table));
+            }
+        }
+
+        // Try to open the table — if it doesn't exist, return 404
+        match NamespaceTable::open(&self.connection, name).await {
+            Ok(ns_table) => {
+                let ns_table = Arc::new(ns_table);
+                let mut tables = self.tables.write().await;
+                tables.insert(name.to_string(), Arc::clone(&ns_table));
+                Ok(ns_table)
+            }
+            Err(_) => Err(PlumeError::NamespaceNotFound(name.to_string())),
+        }
     }
 
     /// Drop a namespace.

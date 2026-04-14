@@ -53,8 +53,10 @@ impl Default for StorageConfig {
 pub struct CacheConfig {
     #[serde(default = "default_ram_capacity_mb")]
     pub ram_capacity_mb: usize,
+    /// NVMe L2 cache capacity. Reserved for future use — not yet implemented.
     #[serde(default = "default_nvme_capacity_gb")]
     pub nvme_capacity_gb: usize,
+    /// NVMe L2 cache path. Reserved for future use — not yet implemented.
     #[serde(default = "default_nvme_path")]
     pub nvme_path: String,
 }
@@ -114,10 +116,10 @@ impl PlumeConfig {
             .map_err(|e| crate::error::PlumeError::Config(format!("failed to parse config: {e}")))
     }
 
-    pub fn from_env_or_default() -> Self {
+    pub fn from_env_or_default() -> Result<Self, crate::error::PlumeError> {
         match std::env::var("PLUME_CONFIG") {
-            Ok(path) => Self::from_file(&path).expect("failed to load config"),
-            Err(_) => Self::default(),
+            Ok(path) => Self::from_file(&path),
+            Err(_) => Ok(Self::default()),
         }
     }
 }

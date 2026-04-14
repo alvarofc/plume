@@ -74,3 +74,37 @@ pub struct IndexResponse {
 
 /// Embedding dimensions for ColBERT-style models.
 pub const EMBEDDING_DIM: usize = 128;
+
+// --- Input validation limits ---
+
+/// Maximum number of results per query.
+pub const MAX_K: usize = 1000;
+
+/// Maximum documents per upsert batch.
+pub const MAX_ROWS_PER_UPSERT: usize = 10_000;
+
+/// Maximum text length per document (bytes).
+pub const MAX_TEXT_LENGTH: usize = 1_000_000;
+
+/// Maximum namespace name length.
+pub const MAX_NAMESPACE_LENGTH: usize = 64;
+
+/// Validate that a namespace name is safe (alphanumeric, hyphens, underscores).
+pub fn validate_namespace(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("namespace must not be empty".into());
+    }
+    if name.len() > MAX_NAMESPACE_LENGTH {
+        return Err(format!(
+            "namespace too long ({} chars, max {MAX_NAMESPACE_LENGTH})",
+            name.len()
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("namespace must be alphanumeric, hyphens, or underscores".into());
+    }
+    Ok(())
+}

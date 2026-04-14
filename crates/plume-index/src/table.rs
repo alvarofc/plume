@@ -17,30 +17,50 @@ use crate::schema::{build_record_batch, plume_schema};
 pub struct NamespaceTable {
     pub name: String,
     table: RwLock<Table>,
+    /// Track whether the table has been written to, to avoid count_rows on every upsert.
+    has_rows: std::sync::atomic::AtomicBool,
 }
 
 impl NamespaceTable {
+    /// Open an existing table (returns error if it doesn't exist).
+    pub async fn open(conn: &Connection, name: &str) -> Result<Self, PlumeError> {
+        let table = conn
+            .open_table(name)
+            .execute()
+            .await
+            .map_err(|e| PlumeError::Index(format!("table {name} not found: {e}")))?;
+
+        Ok(Self {
+            name: name.to_string(),
+            table: RwLock::new(table),
+            has_rows: std::sync::atomic::AtomicBool::new(true),
+        })
+    }
+
     /// Open an existing table or create a new one.
     pub async fn open_or_create(conn: &Connection, name: &str) -> Result<Self, PlumeError> {
-        let table = match conn.open_table(name).execute().await {
+        let (table, has_data) = match conn.open_table(name).execute().await {
             Ok(t) => {
                 info!(namespace = name, "opened existing table");
-                t
+                (t, true)
             }
             Err(_) => {
                 let schema = Arc::new(plume_schema());
-                conn.create_empty_table(name, schema)
+                let t = conn
+                    .create_empty_table(name, schema)
                     .execute()
                     .await
                     .map_err(|e| {
                         PlumeError::Index(format!("failed to create table {name}: {e}"))
-                    })?
+                    })?;
+                (t, false)
             }
         };
 
         Ok(Self {
             name: name.to_string(),
             table: RwLock::new(table),
+            has_rows: std::sync::atomic::AtomicBool::new(has_data),
         })
     }
 
@@ -57,25 +77,19 @@ impl NamespaceTable {
 
         let table = self.table.write().await;
 
-        let row_count = table
-            .count_rows(None)
-            .await
-            .map_err(|e| PlumeError::Index(format!("count failed: {e}")))?;
-
-        if row_count == 0 {
-            // Empty table: use simple add
+        if !self.has_rows.load(std::sync::atomic::Ordering::Relaxed) {
+            // Empty table: use simple add (merge_insert panics on empty tables)
             table
                 .add(vec![batch])
                 .execute()
                 .await
                 .map_err(|e| PlumeError::Index(format!("insert failed: {e}")))?;
+            self.has_rows
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         } else {
             // Table has data: use merge-insert for upsert semantics
             let schema = Arc::new(crate::schema::plume_schema());
-            let reader = Box::new(RecordBatchIterator::new(
-                vec![Ok(batch)],
-                schema,
-            ));
+            let reader = Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
             let mut merge = table.merge_insert(&["id"]);
             merge.when_matched_update_all(None);
             merge.when_not_matched_insert_all();
@@ -193,7 +207,7 @@ impl NamespaceTable {
 
     /// Build an IVF_PQ vector index for faster search.
     pub async fn build_vector_index(&self) -> Result<(), PlumeError> {
-        let table = self.table.read().await;
+        let table = self.table.write().await;
 
         table
             .create_index(&["multivector"], lancedb::index::Index::Auto)
@@ -207,7 +221,7 @@ impl NamespaceTable {
 
     /// Build a BM25 full-text search index on the text column.
     pub async fn build_fts_index(&self) -> Result<(), PlumeError> {
-        let table = self.table.read().await;
+        let table = self.table.write().await;
 
         table
             .create_index(

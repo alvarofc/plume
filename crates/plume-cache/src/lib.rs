@@ -107,6 +107,12 @@ impl SearchCache {
         self.generations.increment(namespace);
     }
 
+    /// Remove a namespace's generation counter entirely.
+    /// Call this when a namespace is dropped to prevent counter leaks.
+    pub fn remove_namespace(&self, namespace: &str) {
+        self.generations.remove(namespace);
+    }
+
     /// Get cache statistics.
     pub fn stats(&self) -> CacheStats {
         CacheStats {

@@ -30,8 +30,11 @@ pub fn maxsim_score(query: &MultiVector, document: &MultiVector) -> f32 {
 }
 
 /// Cosine similarity between two vectors (assumed L2-normalized → dot product).
+/// Returns 0.0 if dimensions don't match (defensive — should not happen with valid data).
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
+    if a.len() != b.len() {
+        return 0.0;
+    }
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
