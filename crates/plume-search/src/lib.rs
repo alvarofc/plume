@@ -91,13 +91,13 @@ impl SearchEngine {
         query_vectors: &MultiVector,
         k: usize,
     ) -> Result<Vec<plume_core::types::SearchResult>, PlumeError> {
-        let candidates = if table.has_ann_index().await? {
-            let candidate_limit = self
-                .index_config
-                .ann_candidate_multiplier
-                .saturating_mul(k)
-                .max(k);
+        let candidate_limit = self
+            .index_config
+            .ann_candidate_multiplier
+            .saturating_mul(k)
+            .max(k);
 
+        let candidates = if table.has_ann_index().await? {
             table
                 .ann_search_with_vectors(
                     query_vectors,
@@ -107,7 +107,13 @@ impl SearchEngine {
                 )
                 .await?
         } else {
-            table.scan_with_vectors(table.count().await?).await?
+            // Fallback for early-stage namespaces (pre-`/index`): same
+            // candidate cap as the ANN path. Scans only the first
+            // `candidate_limit` rows, which keeps memory bounded on large
+            // namespaces. Small namespaces (count <= candidate_limit) still
+            // score every document, so recall is preserved while the index
+            // is being built.
+            table.scan_with_vectors(candidate_limit).await?
         };
 
         let mut scored: Vec<_> = candidates

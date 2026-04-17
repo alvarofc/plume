@@ -65,7 +65,8 @@ Env vars (both benches): `PLUME_BENCH_DOCS`, `PLUME_BENCH_K`, `PLUME_BENCH_PARTI
 - **Distance metric must match index.** We build IVF_PQ with `DistanceType::Cosine`; queries must also use Cosine or results are invalid.
 - **`nprobes(n)`** sets both min and max partitions. For adaptive probing, call `minimum_nprobes` and `maximum_nprobes` separately.
 - **`refine_factor`** always incurs a full-vector fetch, even at `refine_factor=1`. Without it, `_distance` is an approximate PQ distance.
-- **ANN fallback.** `SearchEngine::semantic_search` falls back to a full scan when `has_ann_index()` is false, so early-stage namespaces still return correct results.
+- **ANN fallback.** `SearchEngine::semantic_search` falls back to a bounded scan (capped at `ann_candidate_multiplier * k`) when `has_ann_index()` is false. Early-stage namespaces still return results, but once the corpus exceeds the candidate cap the operator needs to build the ANN index to keep recall intact.
+- **Cache tiering.** `SearchCache` uses a RAM+NVMe hybrid cache by default. Setting `cache.nvme_capacity_gb = 0` switches to an in-memory-only cache — useful on read-only filesystems, ephemeral containers, or CI.
 
 ## README numbers
 
