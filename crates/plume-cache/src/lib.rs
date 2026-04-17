@@ -39,6 +39,12 @@ pub struct CacheValue {
 /// only the in-memory tier is used. This keeps plume runnable on
 /// read-only filesystems or ephemeral containers where no writable
 /// cache directory is available.
+///
+/// The NVMe tier is cleared on every startup. `GenerationCounter` lives
+/// in-memory, so persisted entries from a prior run would share keys
+/// (namespace, generation=0) with fresh post-restart writes and could be
+/// served as stale hits after the first `invalidate`. Wiping the tier at
+/// boot trades warm-start latency for correctness.
 pub struct SearchCache {
     backend: Backend,
     /// Generation counters per namespace
@@ -83,6 +89,19 @@ impl SearchCache {
         let nvme_bytes = config.nvme_capacity_gb * 1024 * 1024 * 1024;
         let nvme_path = Path::new(&config.nvme_path);
 
+        // Wipe any prior cache contents: generation counters are in-memory,
+        // so persisted entries from a previous process would collide with
+        // freshly-issued (namespace, generation=0) keys and could be served
+        // as stale hits. See doc comment on `SearchCache`.
+        if nvme_path.exists() {
+            std::fs::remove_dir_all(nvme_path).map_err(|e| {
+                PlumeError::Cache(format!(
+                    "failed to clear cache directory {}: {e}",
+                    nvme_path.display()
+                ))
+            })?;
+        }
+
         std::fs::create_dir_all(nvme_path).map_err(|e| {
             PlumeError::Cache(format!(
                 "failed to create cache directory {}: {e}",
@@ -102,7 +121,8 @@ impl SearchCache {
 
         let hybrid = HybridCacheBuilder::new()
             .with_name("plume-search-cache")
-            // Persist entries on insert so the NVMe tier remains warm across restarts.
+            // Persist entries on insert so the NVMe tier absorbs hot RAM evictions.
+            // The tier is wiped on startup (see above), so this only buys intra-run warmth.
             .with_policy(HybridCachePolicy::WriteOnInsertion)
             .memory(ram_bytes)
             .with_weighter(|_key: &CacheKey, value: &CacheValue| {
@@ -314,7 +334,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persists_entries_to_disk_across_reopen() {
+    async fn clears_persisted_entries_on_startup() {
+        // Generation counters live in memory, so persisted entries from
+        // a previous run would share keys with fresh (gen=0) writes and
+        // could serve stale data after the first invalidate. The cache
+        // must therefore drop any prior NVMe contents on startup.
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
         let query_hash = hash_query("retry", "semantic");
@@ -325,6 +349,7 @@ mod tests {
 
         let reopened = SearchCache::new(&config).await.unwrap();
         let cached = reopened.get("code", query_hash).await.unwrap();
-        assert!(cached.is_some());
+        assert!(cached.is_none());
+        assert_eq!(reopened.stats().misses, 1);
     }
 }

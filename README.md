@@ -145,7 +145,7 @@ curl -X POST http://localhost:3000/ns/code/query \
 Vector and FTS indexes are built asynchronously. Call these after bulk ingestion:
 
 ```bash
-# Build IVF_PQ ANN index over the per-document `ann_vector` column
+# Build IVF_PQ ANN index over the per-document `multivector` column
 curl -X POST http://localhost:3000/ns/code/index
 
 # Build BM25 full-text index
