@@ -8,6 +8,7 @@ use plume_core::config::IndexConfig;
 use plume_core::error::PlumeError;
 use plume_core::types::{MultiVector, QueryResponse, SearchMode};
 use plume_index::NamespaceTable;
+use tracing::warn;
 
 pub use fusion::rrf_fusion;
 pub use maxsim::maxsim_score;
@@ -41,13 +42,25 @@ impl SearchEngine {
             SearchMode::Hybrid => "hybrid",
         };
 
-        // Check cache
+        // Check cache. A cache failure (disk IO, corruption, serialization)
+        // is treated as a miss: the cache is an optimization, and a degraded
+        // hot tier must not take search offline.
         let query_hash = hash_query(query_text, mode_str);
-        if let Some(cached) = self.cache.get(&table.name, query_hash).await? {
-            return Ok(QueryResponse {
-                results: cached,
-                cache_hit: true,
-            });
+        match self.cache.get(&table.name, query_hash).await {
+            Ok(Some(cached)) => {
+                return Ok(QueryResponse {
+                    results: cached,
+                    cache_hit: true,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    namespace = %table.name,
+                    error = %e,
+                    "search cache lookup failed; continuing as miss"
+                );
+            }
         }
 
         let results = match mode {

@@ -206,7 +206,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use uuid::Uuid;
+    use tempfile::TempDir;
 
     fn sample_results() -> Vec<SearchResult> {
         vec![SearchResult {
@@ -217,18 +217,20 @@ mod tests {
         }]
     }
 
-    fn test_config() -> CacheConfig {
-        let path = std::env::temp_dir().join(format!("plume-cache-test-{}", Uuid::new_v4()));
+    /// Build a cache config anchored on a TempDir so the NVMe tier is
+    /// cleaned up automatically when the guard is dropped.
+    fn test_config(dir: &TempDir) -> CacheConfig {
         CacheConfig {
             ram_capacity_mb: 8,
             nvme_capacity_gb: 1,
-            nvme_path: path.to_string_lossy().to_string(),
+            nvme_path: dir.path().to_string_lossy().to_string(),
         }
     }
 
     #[tokio::test]
     async fn returns_cached_results() {
-        let cache = SearchCache::new(&test_config()).await.unwrap();
+        let dir = TempDir::new().unwrap();
+        let cache = SearchCache::new(&test_config(&dir)).await.unwrap();
         let query_hash = hash_query("retry", "semantic");
 
         cache.insert("code", query_hash, sample_results());
@@ -240,7 +242,8 @@ mod tests {
 
     #[tokio::test]
     async fn generation_invalidation_skips_stale_entries() {
-        let cache = SearchCache::new(&test_config()).await.unwrap();
+        let dir = TempDir::new().unwrap();
+        let cache = SearchCache::new(&test_config(&dir)).await.unwrap();
         let query_hash = hash_query("retry", "semantic");
 
         cache.insert("code", query_hash, sample_results());
@@ -253,7 +256,8 @@ mod tests {
 
     #[tokio::test]
     async fn persists_entries_to_disk_across_reopen() {
-        let config = test_config();
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
         let query_hash = hash_query("retry", "semantic");
 
         let cache = SearchCache::new(&config).await.unwrap();

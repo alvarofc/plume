@@ -288,7 +288,6 @@ impl IntoResponse for AppError {
 mod tests {
     use super::*;
 
-    use std::fs;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -302,16 +301,18 @@ mod tests {
     use plume_encoder::build_encoder;
     use plume_index::IndexManager;
     use plume_search::SearchEngine;
+    use tempfile::TempDir;
     use tower::ServiceExt;
-    use uuid::Uuid;
 
     use crate::jobs::IndexJobRegistry;
 
-    async fn test_app() -> Router {
-        let dir = std::env::temp_dir().join(format!("plume-api-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+    /// Build a test app on an ephemeral directory. The returned `TempDir`
+    /// must stay alive for the duration of the test so that LanceDB and the
+    /// NVMe cache can keep writing to it; dropping it removes everything.
+    async fn test_app() -> (Router, TempDir) {
+        let dir = TempDir::new().unwrap();
         let storage = StorageConfig {
-            uri: dir.to_string_lossy().to_string(),
+            uri: dir.path().to_string_lossy().to_string(),
             region: None,
             endpoint: None,
         };
@@ -324,7 +325,7 @@ mod tests {
             cache: CacheConfig {
                 ram_capacity_mb: 16,
                 nvme_capacity_gb: 1,
-                nvme_path: dir.join("cache").to_string_lossy().to_string(),
+                nvme_path: dir.path().join("cache").to_string_lossy().to_string(),
             },
             encoder: EncoderConfig {
                 model: "mock".to_string(),
@@ -347,7 +348,7 @@ mod tests {
             jobs: Arc::new(IndexJobRegistry::new()),
         };
 
-        router(state)
+        (router(state), dir)
     }
 
     async fn response_json<T: serde::de::DeserializeOwned>(
@@ -363,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
-        let app = test_app().await;
+        let (app, _tmp) = test_app().await;
 
         let (status, body): (StatusCode, serde_json::Value) = response_json(
             &app,
@@ -380,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_then_query_returns_results() {
-        let app = test_app().await;
+        let (app, _tmp) = test_app().await;
 
         let upsert = json!({
             "rows": [
@@ -419,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn fts_index_build_returns_job_and_can_be_polled() {
-        let app = test_app().await;
+        let (app, _tmp) = test_app().await;
 
         let upsert = json!({
             "rows": [
@@ -477,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_index_job_returns_not_found() {
-        let app = test_app().await;
+        let (app, _tmp) = test_app().await;
 
         let (status, body): (StatusCode, serde_json::Value) = response_json(
             &app,

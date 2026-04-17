@@ -67,16 +67,14 @@ impl IndexManager {
             }
         }
 
-        // Try to open the table — if it doesn't exist, return 404
-        match NamespaceTable::open(&self.connection, name).await {
-            Ok(ns_table) => {
-                let ns_table = Arc::new(ns_table);
-                let mut tables = self.tables.write().await;
-                tables.insert(name.to_string(), Arc::clone(&ns_table));
-                Ok(ns_table)
-            }
-            Err(_) => Err(PlumeError::NamespaceNotFound(name.to_string())),
-        }
+        // `NamespaceTable::open` maps `TableNotFound` to
+        // `PlumeError::NamespaceNotFound` and propagates other failures
+        // (permissions, object-store, corruption) as `PlumeError::Index`.
+        let ns_table = NamespaceTable::open(&self.connection, name).await?;
+        let ns_table = Arc::new(ns_table);
+        let mut tables = self.tables.write().await;
+        tables.insert(name.to_string(), Arc::clone(&ns_table));
+        Ok(ns_table)
     }
 
     /// Drop a namespace.

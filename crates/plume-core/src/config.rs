@@ -152,7 +152,7 @@ fn default_port() -> u16 {
     3000
 }
 fn default_storage_uri() -> String {
-    "s3://plume/data".into()
+    "./data/lancedb".into()
 }
 fn default_ram_capacity_mb() -> usize {
     2048
@@ -161,7 +161,7 @@ fn default_nvme_capacity_gb() -> usize {
     50
 }
 fn default_nvme_path() -> String {
-    "/var/cache/plume".into()
+    "./data/plume-cache".into()
 }
 fn default_model() -> String {
     "lightonai/LateOn-Code-edge".into()

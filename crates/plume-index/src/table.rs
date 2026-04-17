@@ -25,13 +25,16 @@ pub struct NamespaceTable {
 }
 
 impl NamespaceTable {
-    /// Open an existing table (returns error if it doesn't exist).
+    /// Open an existing table. Returns `NamespaceNotFound` only when the
+    /// underlying LanceDB table is genuinely absent; other failures
+    /// (permissions, object-store, corruption, …) surface as `Index`.
     pub async fn open(conn: &Connection, name: &str) -> Result<Self, PlumeError> {
-        let table = conn
-            .open_table(name)
-            .execute()
-            .await
-            .map_err(|e| PlumeError::Index(format!("table {name} not found: {e}")))?;
+        let table = conn.open_table(name).execute().await.map_err(|e| match e {
+            lancedb::Error::TableNotFound { .. } => {
+                PlumeError::NamespaceNotFound(name.to_string())
+            }
+            other => PlumeError::Index(format!("failed to open table {name}: {other}")),
+        })?;
 
         Ok(Self {
             name: name.to_string(),
