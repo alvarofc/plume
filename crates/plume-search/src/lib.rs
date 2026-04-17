@@ -4,6 +4,7 @@ mod maxsim;
 use std::sync::Arc;
 
 use plume_cache::{hash_query, SearchCache};
+use plume_core::config::IndexConfig;
 use plume_core::error::PlumeError;
 use plume_core::types::{MultiVector, QueryResponse, SearchMode};
 use plume_index::NamespaceTable;
@@ -14,11 +15,15 @@ pub use maxsim::maxsim_score;
 /// Orchestrates search: encode -> cache check -> scan + MaxSim score -> fuse -> cache store.
 pub struct SearchEngine {
     cache: Arc<SearchCache>,
+    index_config: IndexConfig,
 }
 
 impl SearchEngine {
-    pub fn new(cache: Arc<SearchCache>) -> Self {
-        Self { cache }
+    pub fn new(cache: Arc<SearchCache>, index_config: IndexConfig) -> Self {
+        Self {
+            cache,
+            index_config,
+        }
     }
 
     /// Run a search query against a namespace.
@@ -38,7 +43,7 @@ impl SearchEngine {
 
         // Check cache
         let query_hash = hash_query(query_text, mode_str);
-        if let Some(cached) = self.cache.get(&table.name, query_hash) {
+        if let Some(cached) = self.cache.get(&table.name, query_hash).await? {
             return Ok(QueryResponse {
                 results: cached,
                 cache_hit: true,
@@ -46,12 +51,8 @@ impl SearchEngine {
         }
 
         let results = match mode {
-            SearchMode::Semantic => {
-                self.semantic_search(table, query_vectors, k).await?
-            }
-            SearchMode::Fts => {
-                table.fts_search(query_text, k).await?
-            }
+            SearchMode::Semantic => self.semantic_search(table, query_vectors, k).await?,
+            SearchMode::Fts => table.fts_search(query_text, k).await?,
             SearchMode::Hybrid => {
                 let (semantic, fts) = tokio::try_join!(
                     self.semantic_search(table, query_vectors, k * 2),
@@ -70,18 +71,32 @@ impl SearchEngine {
         })
     }
 
-    /// ColBERT-style semantic search: scan documents, score with MaxSim, rank.
+    /// ColBERT-style semantic search: ANN candidate retrieval, then exact MaxSim re-rank.
     async fn semantic_search(
         &self,
         table: &NamespaceTable,
         query_vectors: &MultiVector,
         k: usize,
     ) -> Result<Vec<plume_core::types::SearchResult>, PlumeError> {
-        // Scan all documents with their multivectors
-        // For large datasets, this should be replaced with ANN candidate retrieval + re-rank
-        let candidates = table.scan_with_vectors(k * 10).await?;
+        let candidates = if table.has_ann_index().await? {
+            let candidate_limit = self
+                .index_config
+                .ann_candidate_multiplier
+                .saturating_mul(k)
+                .max(k);
 
-        // Score each candidate with MaxSim
+            table
+                .ann_search_with_vectors(
+                    query_vectors,
+                    candidate_limit,
+                    self.index_config.nprobes as usize,
+                    self.index_config.refine_factor,
+                )
+                .await?
+        } else {
+            table.scan_with_vectors(table.count().await?).await?
+        };
+
         let mut scored: Vec<_> = candidates
             .into_iter()
             .map(|(mut result, doc_vectors)| {
@@ -90,10 +105,12 @@ impl SearchEngine {
             })
             .collect();
 
-        // Sort by score descending
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        // Take top k
         scored.truncate(k);
         Ok(scored)
     }

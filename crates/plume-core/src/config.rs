@@ -53,10 +53,10 @@ impl Default for StorageConfig {
 pub struct CacheConfig {
     #[serde(default = "default_ram_capacity_mb")]
     pub ram_capacity_mb: usize,
-    /// NVMe L2 cache capacity. Reserved for future use — not yet implemented.
+    /// NVMe/disk cache capacity for the persistent L2 tier.
     #[serde(default = "default_nvme_capacity_gb")]
     pub nvme_capacity_gb: usize,
-    /// NVMe L2 cache path. Reserved for future use — not yet implemented.
+    /// Filesystem path used by the persistent L2 tier.
     #[serde(default = "default_nvme_path")]
     pub nvme_path: String,
 }
@@ -95,15 +95,24 @@ impl Default for EncoderConfig {
 pub struct IndexConfig {
     #[serde(default = "default_nbits")]
     pub nbits: u32,
+    #[serde(default)]
+    pub num_partitions: Option<u32>,
     #[serde(default = "default_nprobes")]
     pub nprobes: u32,
+    #[serde(default)]
+    pub refine_factor: Option<u32>,
+    #[serde(default = "default_ann_candidate_multiplier")]
+    pub ann_candidate_multiplier: usize,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             nbits: default_nbits(),
+            num_partitions: None,
             nprobes: default_nprobes(),
+            refine_factor: None,
+            ann_candidate_multiplier: default_ann_candidate_multiplier(),
         }
     }
 }
@@ -164,8 +173,11 @@ fn default_batch_size() -> usize {
     32
 }
 fn default_nbits() -> u32 {
-    4
+    8
 }
 fn default_nprobes() -> u32 {
-    32
+    20
+}
+fn default_ann_candidate_multiplier() -> usize {
+    50
 }

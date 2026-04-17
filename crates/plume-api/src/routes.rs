@@ -8,8 +8,8 @@ use axum::{
     Json, Router,
 };
 use plume_core::types::{
-    validate_namespace, IndexResponse, QueryRequest, UpsertRequest, UpsertResponse,
-    MAX_K, MAX_ROWS_PER_UPSERT, MAX_TEXT_LENGTH,
+    validate_namespace, IndexResponse, QueryRequest, UpsertRequest, UpsertResponse, MAX_K,
+    MAX_ROWS_PER_UPSERT, MAX_TEXT_LENGTH,
 };
 use serde_json::json;
 use tracing::{error, info};
@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ns/{ns}/query", post(query))
         .route("/ns/{ns}/index", post(build_index))
         .route("/ns/{ns}/fts-index", post(build_fts_index))
+        .route("/ns/{ns}/index-jobs/{job_id}", get(get_index_job))
         .route("/ns/{ns}/warmup", post(warmup))
         .route("/ns/{ns}", delete(drop_namespace))
         .with_state(state)
@@ -140,17 +141,30 @@ async fn build_index(
 ) -> Result<impl IntoResponse, AppError> {
     validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
     let table = state.index.get_namespace(&ns).await?;
+    let job = state.jobs.create_job(&ns, "vector").await;
+    let jobs = state.jobs.clone();
+    let index_config = state.config.index.clone();
+    let job_id = job.job_id.clone();
+    let task_job_id = job_id.clone();
+    let status_url = format!("/ns/{ns}/index-jobs/{job_id}");
 
     tokio::spawn(async move {
-        if let Err(e) = table.build_vector_index().await {
-            error!(namespace = %ns, error = %e, "vector index build failed");
+        jobs.mark_running(&task_job_id).await;
+        if let Err(e) = table.build_vector_index(&index_config).await {
+            error!(namespace = %ns, error = %e, job_id = %task_job_id, "vector index build failed");
+            jobs.mark_failed(&task_job_id, e.to_string()).await;
+            return;
         }
+        jobs.mark_completed(&task_job_id).await;
     });
 
     Ok((
         StatusCode::ACCEPTED,
         Json(IndexResponse {
             status: "building".to_string(),
+            job_id: Some(job_id),
+            status_url: Some(status_url),
+            index_type: Some("vector".to_string()),
         }),
     ))
 }
@@ -162,19 +176,52 @@ async fn build_fts_index(
 ) -> Result<impl IntoResponse, AppError> {
     validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
     let table = state.index.get_namespace(&ns).await?;
+    let job = state.jobs.create_job(&ns, "fts").await;
+    let jobs = state.jobs.clone();
+    let job_id = job.job_id.clone();
+    let task_job_id = job_id.clone();
+    let status_url = format!("/ns/{ns}/index-jobs/{job_id}");
 
     tokio::spawn(async move {
+        jobs.mark_running(&task_job_id).await;
         if let Err(e) = table.build_fts_index().await {
-            error!(namespace = %ns, error = %e, "FTS index build failed");
+            error!(namespace = %ns, error = %e, job_id = %task_job_id, "FTS index build failed");
+            jobs.mark_failed(&task_job_id, e.to_string()).await;
+            return;
         }
+        jobs.mark_completed(&task_job_id).await;
     });
 
     Ok((
         StatusCode::ACCEPTED,
         Json(IndexResponse {
             status: "building".to_string(),
+            job_id: Some(job_id),
+            status_url: Some(status_url),
+            index_type: Some("fts".to_string()),
         }),
     ))
+}
+
+/// GET /ns/{ns}/index-jobs/{job_id} — poll an async index job.
+async fn get_index_job(
+    State(state): State<AppState>,
+    Path((ns, job_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
+
+    let job = state
+        .jobs
+        .get(&job_id)
+        .await
+        .filter(|job| job.namespace == ns)
+        .ok_or_else(|| {
+            AppError(plume_core::error::PlumeError::NamespaceNotFound(format!(
+                "index job {job_id} for namespace {ns}"
+            )))
+        })?;
+
+    Ok(Json(job))
 }
 
 /// POST /ns/{ns}/warmup — pre-warm cache for a namespace.
@@ -187,7 +234,9 @@ async fn warmup(
     let table = state.index.get_namespace(&ns).await?;
     let count = table.count().await?;
     info!(namespace = %ns, docs = count, "warmup complete");
-    Ok(Json(json!({"status": "ok", "namespace": ns, "docs": count})))
+    Ok(Json(
+        json!({"status": "ok", "namespace": ns, "docs": count}),
+    ))
 }
 
 /// DELETE /ns/{ns} — drop a namespace.
@@ -232,5 +281,214 @@ impl IntoResponse for AppError {
             Json(body),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use plume_cache::SearchCache;
+    use plume_core::config::{
+        CacheConfig, EncoderConfig, PlumeConfig, ServerConfig, StorageConfig,
+    };
+    use plume_core::types::{IndexJobResponse, IndexJobStatus, QueryResponse};
+    use plume_encoder::build_encoder;
+    use plume_index::IndexManager;
+    use plume_search::SearchEngine;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use crate::jobs::IndexJobRegistry;
+
+    async fn test_app() -> Router {
+        let dir = std::env::temp_dir().join(format!("plume-api-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let storage = StorageConfig {
+            uri: dir.to_string_lossy().to_string(),
+            region: None,
+            endpoint: None,
+        };
+        let config = PlumeConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+            },
+            storage: storage.clone(),
+            cache: CacheConfig {
+                ram_capacity_mb: 16,
+                nvme_capacity_gb: 1,
+                nvme_path: dir.join("cache").to_string_lossy().to_string(),
+            },
+            encoder: EncoderConfig {
+                model: "mock".to_string(),
+                pool_factor: 2,
+                batch_size: 8,
+            },
+            index: Default::default(),
+        };
+
+        let index = IndexManager::connect(&storage).await.unwrap();
+        let cache = Arc::new(SearchCache::new(&config.cache).await.unwrap());
+        let search = Arc::new(SearchEngine::new(cache.clone(), config.index.clone()));
+        let encoder = Arc::from(build_encoder(&config.encoder));
+        let state = AppState {
+            config,
+            index: Arc::new(index),
+            cache,
+            search,
+            encoder,
+            jobs: Arc::new(IndexJobRegistry::new()),
+        };
+
+        router(state)
+    }
+
+    async fn response_json<T: serde::de::DeserializeOwned>(
+        app: &Router,
+        request: Request<Body>,
+    ) -> (StatusCode, T) {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let parsed = serde_json::from_slice(&body).unwrap();
+        (status, parsed)
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let app = test_app().await;
+
+        let (status, body): (StatusCode, serde_json::Value) = response_json(
+            &app,
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn upsert_then_query_returns_results() {
+        let app = test_app().await;
+
+        let upsert = json!({
+            "rows": [
+                {"id": "1", "text": "retry HTTP requests with exponential backoff", "metadata": {}},
+                {"id": "2", "text": "binary search with generic comparator", "metadata": {}}
+            ]
+        });
+
+        let (upsert_status, _): (StatusCode, UpsertResponse) = response_json(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/ns/code/upsert")
+                .header("content-type", "application/json")
+                .body(Body::from(upsert.to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(upsert_status, StatusCode::OK);
+
+        let query = json!({"query": "exponential backoff", "k": 5, "mode": "semantic"});
+        let (query_status, body): (StatusCode, QueryResponse) = response_json(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/ns/code/query")
+                .header("content-type", "application/json")
+                .body(Body::from(query.to_string()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(query_status, StatusCode::OK);
+        assert!(!body.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fts_index_build_returns_job_and_can_be_polled() {
+        let app = test_app().await;
+
+        let upsert = json!({
+            "rows": [
+                {"id": "1", "text": "retry HTTP requests with exponential backoff", "metadata": {}}
+            ]
+        });
+
+        let _: (StatusCode, UpsertResponse) = response_json(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/ns/code/upsert")
+                .header("content-type", "application/json")
+                .body(Body::from(upsert.to_string()))
+                .unwrap(),
+        )
+        .await;
+
+        let (status, response): (StatusCode, IndexResponse) = response_json(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/ns/code/fts-index")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let job_id = response.job_id.expect("job id");
+
+        let mut final_status = IndexJobStatus::Queued;
+        for _ in 0..20 {
+            let (_, job): (StatusCode, IndexJobResponse) = response_json(
+                &app,
+                Request::builder()
+                    .uri(format!("/ns/code/index-jobs/{job_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+
+            final_status = job.status;
+            if matches!(
+                final_status,
+                IndexJobStatus::Completed | IndexJobStatus::Failed
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(final_status, IndexJobStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn unknown_index_job_returns_not_found() {
+        let app = test_app().await;
+
+        let (status, body): (StatusCode, serde_json::Value) = response_json(
+            &app,
+            Request::builder()
+                .uri("/ns/code/index-jobs/does-not-exist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("index job"));
     }
 }

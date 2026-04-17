@@ -8,7 +8,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY bench/ bench/
 
-RUN cargo build --release --bin plume
+RUN cargo build --release -p plume-api --bin plume --features storage-aws
 
 FROM debian:bookworm-slim
 

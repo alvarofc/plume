@@ -4,6 +4,7 @@ port = 3000
 
 [storage]
 # Local dev with MinIO (docker compose sets AWS_ENDPOINT env var)
+# Requires building plume with the `storage-aws` feature.
 uri = "s3://plume/data"
 region = "us-east-1"
 
@@ -29,5 +30,13 @@ pool_factor = 2
 batch_size = 32
 
 [index]
-nbits = 4
-nprobes = 32
+# IVF_PQ tuned for ColBERT native multi-vector on LanceDB 0.27+.
+# Defaults match the bench-recall sweet spot on BEIR SciFact with a 48-dim
+# ColBERT encoder: ~138ms at recall saturating the model's own ceiling.
+nbits = 8
+num_partitions = 128
+nprobes = 20
+# refine_factor unset: client-side MaxSim rerank already recovers exact
+# ordering from the candidate pool below. Setting refine_factor adds >10×
+# latency with no e2e recall gain.
+ann_candidate_multiplier = 50

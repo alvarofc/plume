@@ -17,5 +17,7 @@ pool_factor = 2
 batch_size = 32
 
 [index]
-nbits = 4
-nprobes = 32
+nbits = 8
+num_partitions = 128
+nprobes = 20
+ann_candidate_multiplier = 50

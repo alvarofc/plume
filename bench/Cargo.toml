@@ -8,6 +8,14 @@ publish = false
 name = "bench-latency"
 path = "bench_latency.rs"
 
+[[bin]]
+name = "bench-ann"
+path = "bench_ann.rs"
+
+[[bin]]
+name = "bench-recall"
+path = "bench_recall.rs"
+
 [dependencies]
 plume-core = { path = "../crates/plume-core" }
 plume-encoder = { path = "../crates/plume-encoder" }

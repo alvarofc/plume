@@ -1,6 +1,6 @@
 # Plume
 
-Multi-vector semantic search engine with tiered caching. Combines ColBERT late-interaction retrieval (MaxSim scoring) with BM25 full-text search, backed by LanceDB for storage on S3, R2, GCS, or local disk.
+Multi-vector semantic search engine with tiered caching. Combines ColBERT late-interaction retrieval (ANN candidate generation + exact MaxSim re-rank) with BM25 full-text search, backed by LanceDB for storage on S3, R2, GCS, or local disk.
 
 ## Architecture
 
@@ -31,17 +31,45 @@ Multi-vector semantic search engine with tiered caching. Combines ColBERT late-i
 | `plume-core` | Shared types, config, errors |
 | `plume-encoder` | ColBERT encoding (ONNX or mock) |
 | `plume-cache` | Tiered RAM/NVMe cache with generation-based invalidation |
-| `plume-index` | LanceDB table management, upsert, scan |
-| `plume-search` | MaxSim scoring, BM25 FTS, RRF hybrid fusion |
+| `plume-index` | LanceDB table management, ANN candidate retrieval, index build |
+| `plume-search` | MaxSim scoring, ANN re-rank orchestration, BM25 FTS, RRF hybrid fusion |
 | `plume-api` | Axum HTTP server and routes |
 
 ## Quickstart
+
+### Build profiles
+
+Plume now defaults to a **lean local build**:
+
+- Local filesystem storage works out of the box.
+- Cloud backends are opt-in at compile time so local development and tests do not pull in the full AWS/GCS stack.
+
+Feature flags:
+
+| Feature | Enables | Typical use |
+|---------|---------|-------------|
+| default | Local filesystem LanceDB only | Fast local development and tests |
+| `storage-aws` | S3-compatible backends, including MinIO and Cloudflare R2 | Docker Compose, S3, R2 |
+| `storage-gcs` | Google Cloud Storage | GCS deployments |
+
+Examples:
+
+```bash
+# Lean local binary
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume
+
+# S3 / MinIO / R2-enabled binary
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --features storage-aws
+
+# GCS-enabled binary
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --features storage-gcs
+```
 
 ### Local (filesystem storage)
 
 ```bash
 # Build
-PROTOC=$(which protoc) cargo build --release --bin plume
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume
 
 # Run with local config
 PLUME_CONFIG=config.local.toml ./target/release/plume
@@ -54,6 +82,7 @@ docker compose up
 ```
 
 This starts Plume on port 3000, MinIO on port 9000 (console on 9001), and auto-creates the `plume` bucket.
+The Docker build uses the `storage-aws` feature because MinIO is S3-compatible storage.
 
 ### ONNX encoder (optional)
 
@@ -64,7 +93,10 @@ By default Plume uses a mock encoder for development. To use the real ColBERT mo
 ./scripts/download-model.sh models/lateon-code-edge
 
 # Build with ONNX support
-PROTOC=$(which protoc) cargo build --release --bin plume --features plume-encoder/onnx
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --features plume-encoder/onnx
+
+# Build with ONNX + S3/MinIO support
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --features plume-encoder/onnx,storage-aws
 
 # Point config to model directory
 # [encoder]
@@ -113,7 +145,7 @@ curl -X POST http://localhost:3000/ns/code/query \
 Vector and FTS indexes are built asynchronously. Call these after bulk ingestion:
 
 ```bash
-# Build IVF_PQ vector index
+# Build IVF_PQ ANN index over the per-document `ann_vector` column
 curl -X POST http://localhost:3000/ns/code/index
 
 # Build BM25 full-text index
@@ -149,15 +181,15 @@ port = 3000
 # Local filesystem
 uri = "./data/lancedb"
 
-# S3 / MinIO (set AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY env vars)
+# S3 / MinIO (requires `storage-aws`; set AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY env vars)
 # uri = "s3://plume/data"
 # region = "us-east-1"
 
-# Cloudflare R2
+# Cloudflare R2 (requires `storage-aws`)
 # uri = "s3://bucket/plume"
 # endpoint = "https://<account>.r2.cloudflarestorage.com"
 
-# Google Cloud Storage
+# Google Cloud Storage (requires `storage-gcs`)
 # uri = "gs://bucket/plume"
 
 [cache]
@@ -171,17 +203,22 @@ pool_factor = 2                         # Average adjacent token vectors (halves
 batch_size = 32
 
 [index]
-nbits = 4       # IVF_PQ quantization bits
-nprobes = 32    # Number of IVF partitions to probe at query time
+nbits = 4                     # IVF_PQ quantization bits
+num_partitions = 64           # IVF partition count (omit to let LanceDB auto-select)
+nprobes = 16                  # Number of IVF partitions to probe at query time
+# refine_factor = 2           # Optional PQ refine stage (helps recall at scale, ~10% latency cost)
+ann_candidate_multiplier = 10 # Retrieve k * multiplier ANN candidates before MaxSim rerank
 ```
 
 ## Search modes
 
 | Mode | Algorithm | Use case |
 |------|-----------|----------|
-| `semantic` | ColBERT MaxSim — scores each query token against all document tokens, sums the max similarities | Best for meaning-based retrieval |
+| `semantic` | ANN candidate retrieval on a pooled document vector, then exact ColBERT MaxSim rerank on full token embeddings | Best for meaning-based retrieval |
 | `fts` | LanceDB BM25 full-text search | Best for exact keyword matching |
 | `hybrid` (default) | Reciprocal Rank Fusion (k=60) of semantic + FTS results | Best overall recall |
+
+If the ANN index has not been built yet, semantic mode falls back to a full-recall scan so behavior stays correct while you are still ingesting or testing locally.
 
 ## Cache invalidation
 
@@ -191,16 +228,55 @@ The cache uses a **generation counter** per namespace. Every write (upsert) incr
 
 ```bash
 PROTOC=$(which protoc) cargo run --release -p plume-bench --bin bench-latency
+
+# Synthetic sweep against MockEncoder — fast wiring/smoke test
+PROTOC=$(which protoc) cargo run --release -p plume-bench --bin bench-ann
+
+# Real recall on BEIR SciFact with a ColBERT ONNX encoder
+PROTOC=$(which protoc) cargo run --release -p plume-bench --bin bench-recall \
+  --features plume-encoder/onnx
 ```
 
-Measured on local filesystem with MockEncoder:
+### SciFact recall (real encoder)
 
-| Metric | 100 docs | 1K docs | 10K docs |
-|--------|----------|---------|----------|
-| Ingest | ~0.5ms/doc | ~0.3ms/doc | ~0.2ms/doc |
-| Cold query | ~5ms | ~17ms | ~19ms |
-| Warm query | ~3us | ~3us | ~3us |
-| Cache hit rate | 99.8% | 99.8% | 99.8% |
+Measured on BEIR SciFact (5,183 docs, 300 test queries with qrels) with the 48-dim `lightonai/LateOn-Code-edge` ColBERT ONNX encoder, `pool_factor=2`, IVF_PQ with 128 partitions, `nbits=8`. `e2e_*_recall` is recall@10 against ground-truth qrels; `ann_recall` is ANN-vs-exact-MaxSim approximation quality.
+
+| nprobes | cand | refine | Avg Latency | p95   | ann_recall | e2e_ann_recall |
+|---------|------|--------|-------------|-------|------------|----------------|
+| 20      | 50   | none   | **138ms**   | 195ms | 0.881      | **0.719**      |
+| 50      | 5    | 10     | 451ms       | 734ms | 0.826      | 0.717          |
+| 20      | 20   | 50     | 2,771ms     | 4,594ms | 0.998    | 0.720          |
+| 20      | 50   | 10     | 2,953ms     | 4,701ms | 1.000    | 0.720          |
+| —       | exact scan | —  | 1,547ms     | —     | baseline   | 0.720          |
+
+Key takeaways:
+
+- **`nprobes=20, candidate_multiplier=50, refine_factor=None`** hits 0.719 e2e recall at 138ms — essentially matching the exact-MaxSim ceiling of 0.720 at >10× the latency. This is the default.
+- Probing more IVF partitions (20→50→100) does not improve recall — the candidate pool + client-side MaxSim re-rank in `plume-search` dominates once the ANN stage supplies enough candidates.
+- `refine_factor` raises ANN-vs-exact approximation recall toward 1.000 but does not move e2e recall — the client-side MaxSim re-rank already recovers exact ordering from a wider candidate pool at a fraction of the latency.
+- The e2e recall ceiling (~0.72) is the model's — not LanceDB's. `LateOn-Code-edge` is a code-oriented 48-dim ColBERT, not fine-tuned on biomedical scientific claims. Published ColBERTv2 numbers on BEIR SciFact are in the same 0.70–0.78 range. A domain-tuned encoder would raise the ceiling.
+
+### Synthetic wiring sweep
+
+`bench-ann` exercises the same code paths on a synthetic code-like corpus with a 2-dim `MockEncoder`. Useful for CI-speed smoke tests and ANN parameter sweeps, but the 2-dim vectors make retrieval trivial — **do not read recall numbers from `bench-ann` as representative**. Use `bench-recall` for real signal.
+
+```bash
+# Sweep LanceDB-recommended ranges against real SciFact + ColBERT
+PLUME_BENCH_PARTITIONS=128 \
+PLUME_BENCH_NPROBES=20,50,100 \
+PLUME_BENCH_CANDIDATES=5,10,20,50 \
+PLUME_BENCH_REFINE=none,10,50 \
+PLUME_BENCH_NBITS=8 \
+PROTOC=$(which protoc) cargo run --release -p plume-bench --bin bench-recall \
+  --features plume-encoder/onnx
+```
+
+Prereqs for `bench-recall`:
+
+```bash
+./scripts/download-model.sh models/lateon-code-edge
+./scripts/download-scifact.sh
+```
 
 ## Development
 
@@ -216,6 +292,27 @@ cargo fmt
 
 # Lint
 cargo clippy
+```
+
+## Lean build notes
+
+The workspace trims compile-time weight in three ways:
+
+- Cloud storage support is opt-in instead of built into every local build.
+- Unused direct dependencies such as `metrics-exporter-prometheus` and `object_store` have been removed.
+- `tokio` uses a narrower feature set that matches the code paths in this repo.
+
+## Related projects
+
+- [`lightonai/next-plaid`](https://github.com/lightonai/next-plaid): the local-first multi-vector engine behind ColGREP. Its README is a useful reference for late-interaction retrieval, quantization, and memory-mapped indexing.
+- [`gordonmurray/firnflow`](https://github.com/gordonmurray/firnflow): a close reference for the RAM -> NVMe -> object-storage architecture we are building toward on top of LanceDB and Foyer.
+
+If you point `storage.uri` at `s3://...` or `gs://...` without the matching feature, Plume now fails fast with an explicit rebuild hint instead of a vague backend error.
+
+On constrained machines, a leaner verification command helps reduce disk pressure during Rust builds:
+
+```bash
+PROTOC=$(which protoc) CARGO_INCREMENTAL=0 RUSTFLAGS='-Cdebuginfo=0' cargo test -p plume-api -j 1
 ```
 
 ## License

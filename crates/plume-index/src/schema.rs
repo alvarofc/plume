@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, FixedSizeListArray, Float32Array, LargeStringArray, ListArray,
-    RecordBatch, StringArray,
+    ArrayRef, FixedSizeListArray, Float32Array, LargeStringArray, ListArray, RecordBatch,
+    StringArray,
 };
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use arrow_schema::{DataType, Field, Schema};
@@ -15,8 +15,11 @@ use plume_core::types::{MultiVector, EMBEDDING_DIM};
 /// Schema:
 ///   id: Utf8 (primary key)
 ///   text: LargeUtf8 (full document text, for BM25)
-///   multivector: List<FixedSizeList<Float32, 128>> (ColBERT token embeddings)
+///   multivector: List<FixedSizeList<Float32, EMBEDDING_DIM>> (ColBERT token embeddings)
 ///   metadata: LargeUtf8 (JSON string)
+///
+/// LanceDB indexes the `multivector` column natively with IVF_PQ + MaxSim
+/// late interaction — no pooled single-vector column is needed.
 pub fn plume_schema() -> Schema {
     let embedding_field = Field::new("item", DataType::Float32, false);
     let token_vec = DataType::FixedSizeList(Arc::new(embedding_field), EMBEDDING_DIM as i32);
@@ -64,7 +67,7 @@ pub fn build_record_batch(
     .map_err(|e| PlumeError::Index(format!("failed to build record batch: {e}")))
 }
 
-/// Build the nested List<FixedSizeList<Float32, 128>> array for multivectors.
+/// Build the nested List<FixedSizeList<Float32, EMBEDDING_DIM>> array for multivectors.
 fn build_multivector_array(multivectors: &[MultiVector]) -> Result<ArrayRef, PlumeError> {
     let mut all_values: Vec<f32> = Vec::new();
     let mut list_offsets: Vec<i32> = vec![0];
@@ -86,12 +89,10 @@ fn build_multivector_array(multivectors: &[MultiVector]) -> Result<ArrayRef, Plu
 
     let values = Float32Array::from(all_values);
 
-    // Inner: FixedSizeList<Float32, 128>
     let fsl_field = Arc::new(Field::new("item", DataType::Float32, false));
     let fsl_array =
         FixedSizeListArray::new(fsl_field, EMBEDDING_DIM as i32, Arc::new(values), None);
 
-    // Outer: List<FixedSizeList<...>>
     let inner_field = Arc::new(Field::new(
         "item",
         DataType::FixedSizeList(
@@ -105,4 +106,23 @@ fn build_multivector_array(multivectors: &[MultiVector]) -> Result<ArrayRef, Plu
     let list_array = ListArray::new(inner_field, offsets, Arc::new(fsl_array), None);
 
     Ok(Arc::new(list_array))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_batch_has_multivector_column() {
+        let ids = vec!["1".to_string()];
+        let texts = vec!["hello".to_string()];
+        let multivectors = vec![vec![vec![1.0; EMBEDDING_DIM]]];
+        let metadata = vec![HashMap::new()];
+
+        let batch = build_record_batch(&ids, &texts, &multivectors, &metadata).expect("batch");
+
+        assert!(batch.column_by_name("multivector").is_some());
+        assert!(batch.column_by_name("ann_vector").is_none());
+        assert_eq!(batch.num_columns(), 4);
+    }
 }

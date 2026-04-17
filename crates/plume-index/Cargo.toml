@@ -3,6 +3,12 @@ name = "plume-index"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+# Enable remote object-store support only for builds that need it.
+storage-aws = ["lancedb/aws"]
+storage-gcs = ["lancedb/gcs"]
+
 [dependencies]
 plume-core = { workspace = true }
 lancedb = { workspace = true }
@@ -10,7 +16,6 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-buffer = { workspace = true }
-object_store = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

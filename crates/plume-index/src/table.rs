@@ -4,8 +4,11 @@ use std::sync::Arc;
 use arrow_array::{Array, RecordBatch, RecordBatchIterator};
 use futures::StreamExt;
 use lancedb::index::scalar::FullTextSearchQuery;
+use lancedb::index::{vector::IvfPqIndexBuilder, Index};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::DistanceType;
 use lancedb::{Connection, Table};
+use plume_core::config::IndexConfig as PlumeIndexConfig;
 use plume_core::error::PlumeError;
 use plume_core::types::{MultiVector, SearchResult};
 use tokio::sync::RwLock;
@@ -108,11 +111,9 @@ impl NamespaceTable {
         &self,
         limit: usize,
     ) -> Result<Vec<(SearchResult, MultiVector)>, PlumeError> {
-        use arrow_array::FixedSizeListArray;
-
         let table = self.table.read().await;
 
-        let mut stream = table
+        let stream = table
             .query()
             .select(Select::columns(&["id", "text", "metadata", "multivector"]))
             .limit(limit)
@@ -120,75 +121,61 @@ impl NamespaceTable {
             .await
             .map_err(|e| PlumeError::Index(format!("scan failed: {e}")))?;
 
-        let mut results = Vec::new();
+        parse_search_results_with_vectors(stream).await
+    }
 
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| PlumeError::Index(format!("scan stream error: {e}")))?;
-
-            let ids = batch
-                .column_by_name("id")
-                .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>())
-                .ok_or_else(|| PlumeError::Index("missing id column".into()))?;
-            let texts = batch
-                .column_by_name("text")
-                .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeStringArray>())
-                .ok_or_else(|| PlumeError::Index("missing text column".into()))?;
-            let meta_col = batch.column_by_name("metadata");
-            let mv_col = batch
-                .column_by_name("multivector")
-                .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>())
-                .ok_or_else(|| PlumeError::Index("missing multivector column".into()))?;
-
-            for i in 0..batch.num_rows() {
-                let id = ids.value(i).to_string();
-                let text = texts.value(i).to_string();
-                let metadata: HashMap<String, serde_json::Value> = meta_col
-                    .and_then(|c| {
-                        c.as_any()
-                            .downcast_ref::<arrow_array::LargeStringArray>()
-                            .map(|a| a.value(i))
-                    })
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-
-                // Extract multivector: List<FixedSizeList<Float32, 128>>
-                let inner_array = mv_col.value(i);
-                let fsl = inner_array
-                    .as_any()
-                    .downcast_ref::<FixedSizeListArray>()
-                    .ok_or_else(|| PlumeError::Index("multivector inner type mismatch".into()))?;
-
-                let mut mv = Vec::with_capacity(fsl.len());
-                for j in 0..fsl.len() {
-                    let vec_array = fsl.value(j);
-                    let floats = vec_array
-                        .as_any()
-                        .downcast_ref::<arrow_array::Float32Array>()
-                        .ok_or_else(|| PlumeError::Index("vector element type mismatch".into()))?;
-                    let vec: Vec<f32> = (0..floats.len()).map(|k| floats.value(k)).collect();
-                    mv.push(vec);
-                }
-
-                let result = SearchResult {
-                    id,
-                    text,
-                    score: 0.0,
-                    metadata,
-                };
-                results.push((result, mv));
-            }
+    /// Retrieve ANN candidates and their multivectors for MaxSim re-ranking.
+    ///
+    /// Runs a native multi-vector query on the `multivector` column: LanceDB
+    /// concatenates all query token vectors into a single multi-vector query
+    /// and applies MaxSim late interaction at the IVF_PQ index level.
+    pub async fn ann_search_with_vectors(
+        &self,
+        query_multivector: &MultiVector,
+        limit: usize,
+        nprobes: usize,
+        refine_factor: Option<u32>,
+    ) -> Result<Vec<(SearchResult, MultiVector)>, PlumeError> {
+        if query_multivector.is_empty() {
+            return Err(PlumeError::InvalidRequest(
+                "query multivector must contain at least one token vector".into(),
+            ));
         }
 
-        Ok(results)
+        let table = self.table.read().await;
+
+        let mut iter = query_multivector.iter();
+        let first = iter.next().unwrap().as_slice();
+        let mut query = table
+            .query()
+            .nearest_to(first)
+            .map_err(|e| PlumeError::Index(format!("ANN query build failed: {e}")))?
+            .column("multivector")
+            .distance_type(DistanceType::Cosine)
+            .nprobes(nprobes.max(1))
+            .select(Select::columns(&["id", "text", "metadata", "multivector", "_distance"]));
+
+        for token in iter {
+            query = query
+                .add_query_vector(token.as_slice())
+                .map_err(|e| PlumeError::Index(format!("add_query_vector failed: {e}")))?;
+        }
+
+        if let Some(refine_factor) = refine_factor {
+            query = query.refine_factor(refine_factor);
+        }
+
+        let stream = query
+            .limit(limit)
+            .execute()
+            .await
+            .map_err(|e| PlumeError::Index(format!("ANN search failed: {e}")))?;
+
+        parse_search_results_with_vectors(stream).await
     }
 
     /// Run a full-text (BM25) search.
-    pub async fn fts_search(
-        &self,
-        query: &str,
-        k: usize,
-    ) -> Result<Vec<SearchResult>, PlumeError> {
+    pub async fn fts_search(&self, query: &str, k: usize) -> Result<Vec<SearchResult>, PlumeError> {
         let table = self.table.read().await;
 
         let fts_query = FullTextSearchQuery::new(query.to_string());
@@ -205,12 +192,23 @@ impl NamespaceTable {
         parse_search_results(results).await
     }
 
-    /// Build an IVF_PQ vector index for faster search.
-    pub async fn build_vector_index(&self) -> Result<(), PlumeError> {
+    /// Build an IVF_PQ vector index over the multivector column.
+    ///
+    /// The index is built directly on the `multivector` column (a
+    /// `List<FixedSizeList<Float32>>`). LanceDB performs late interaction
+    /// MaxSim scoring at query time using the compressed token vectors.
+    pub async fn build_vector_index(&self, config: &PlumeIndexConfig) -> Result<(), PlumeError> {
         let table = self.table.write().await;
+        let mut builder = IvfPqIndexBuilder::default()
+            .distance_type(DistanceType::Cosine)
+            .num_bits(config.nbits);
+
+        if let Some(num_partitions) = config.num_partitions {
+            builder = builder.num_partitions(num_partitions);
+        }
 
         table
-            .create_index(&["multivector"], lancedb::index::Index::Auto)
+            .create_index(&["multivector"], Index::IvfPq(builder))
             .execute()
             .await
             .map_err(|e| PlumeError::Index(format!("vector index build failed: {e}")))?;
@@ -219,15 +217,24 @@ impl NamespaceTable {
         Ok(())
     }
 
+    pub async fn has_ann_index(&self) -> Result<bool, PlumeError> {
+        let table = self.table.read().await;
+        let indices = table
+            .list_indices()
+            .await
+            .map_err(|e| PlumeError::Index(format!("failed to list indices: {e}")))?;
+
+        Ok(indices
+            .iter()
+            .any(|index| index.columns.iter().any(|column| column == "multivector")))
+    }
+
     /// Build a BM25 full-text search index on the text column.
     pub async fn build_fts_index(&self) -> Result<(), PlumeError> {
         let table = self.table.write().await;
 
         table
-            .create_index(
-                &["text"],
-                lancedb::index::Index::FTS(Default::default()),
-            )
+            .create_index(&["text"], lancedb::index::Index::FTS(Default::default()))
             .execute()
             .await
             .map_err(|e| PlumeError::Index(format!("FTS index build failed: {e}")))?;
@@ -253,8 +260,8 @@ async fn parse_search_results(
     let mut results = Vec::new();
 
     while let Some(batch_result) = stream.next().await {
-        let batch = batch_result
-            .map_err(|e| PlumeError::Index(format!("result stream error: {e}")))?;
+        let batch =
+            batch_result.map_err(|e| PlumeError::Index(format!("result stream error: {e}")))?;
 
         let ids = batch
             .column_by_name("id")
@@ -266,13 +273,11 @@ async fn parse_search_results(
             .ok_or_else(|| PlumeError::Index("missing text column".into()))?;
         let meta_col = batch.column_by_name("metadata");
 
-        let fts_score_col = batch
-            .column_by_name("_score")
-            .and_then(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow_array::Float32Array>()
-                    .cloned()
-            });
+        let fts_score_col = batch.column_by_name("_score").and_then(|c| {
+            c.as_any()
+                .downcast_ref::<arrow_array::Float32Array>()
+                .cloned()
+        });
 
         for i in 0..batch.num_rows() {
             let id = ids.value(i).to_string();
@@ -299,6 +304,73 @@ async fn parse_search_results(
                 score,
                 metadata,
             });
+        }
+    }
+
+    Ok(results)
+}
+
+async fn parse_search_results_with_vectors(
+    mut stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(SearchResult, MultiVector)>, PlumeError> {
+    use arrow_array::FixedSizeListArray;
+
+    let mut results = Vec::new();
+
+    while let Some(batch_result) = stream.next().await {
+        let batch =
+            batch_result.map_err(|e| PlumeError::Index(format!("result stream error: {e}")))?;
+
+        let ids = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>())
+            .ok_or_else(|| PlumeError::Index("missing id column".into()))?;
+        let texts = batch
+            .column_by_name("text")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeStringArray>())
+            .ok_or_else(|| PlumeError::Index("missing text column".into()))?;
+        let meta_col = batch.column_by_name("metadata");
+        let mv_col = batch
+            .column_by_name("multivector")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>())
+            .ok_or_else(|| PlumeError::Index("missing multivector column".into()))?;
+
+        for i in 0..batch.num_rows() {
+            let id = ids.value(i).to_string();
+            let text = texts.value(i).to_string();
+            let metadata: HashMap<String, serde_json::Value> = meta_col
+                .and_then(|c| {
+                    c.as_any()
+                        .downcast_ref::<arrow_array::LargeStringArray>()
+                        .map(|a| a.value(i))
+                })
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+
+            let inner_array = mv_col.value(i);
+            let fsl = inner_array
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .ok_or_else(|| PlumeError::Index("multivector inner type mismatch".into()))?;
+
+            let mut mv = Vec::with_capacity(fsl.len());
+            for j in 0..fsl.len() {
+                let vec_array = fsl.value(j);
+                let floats = vec_array
+                    .as_any()
+                    .downcast_ref::<arrow_array::Float32Array>()
+                    .ok_or_else(|| PlumeError::Index("vector element type mismatch".into()))?;
+                let vec: Vec<f32> = (0..floats.len()).map(|k| floats.value(k)).collect();
+                mv.push(vec);
+            }
+
+            let result = SearchResult {
+                id,
+                text,
+                score: 0.0,
+                metadata,
+            };
+            results.push((result, mv));
         }
     }
 
