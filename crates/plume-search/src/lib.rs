@@ -97,7 +97,22 @@ impl SearchEngine {
             .saturating_mul(k)
             .max(k);
 
-        let candidates = if table.has_ann_index().await? {
+        // A failing `list_indices` (transient metadata/object-store hiccup)
+        // must not take search offline. Treat it as "no ANN index" so we
+        // still return results via the bounded scan path.
+        let has_ann = match table.has_ann_index().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    namespace = %table.name,
+                    error = %e,
+                    "ANN index check failed; falling back to bounded scan"
+                );
+                false
+            }
+        };
+
+        let candidates = if has_ann {
             table
                 .ann_search_with_vectors(
                     query_vectors,

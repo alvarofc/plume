@@ -216,7 +216,7 @@ async fn get_index_job(
         .await
         .filter(|job| job.namespace == ns)
         .ok_or_else(|| {
-            AppError(plume_core::error::PlumeError::NamespaceNotFound(format!(
+            AppError(plume_core::error::PlumeError::NotFound(format!(
                 "index job {job_id} for namespace {ns}"
             )))
         })?;
