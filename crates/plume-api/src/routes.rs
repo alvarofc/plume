@@ -143,6 +143,7 @@ async fn build_index(
     let table = state.index.get_namespace(&ns).await?;
     let job = state.jobs.create_job(&ns, "vector").await;
     let jobs = state.jobs.clone();
+    let cache = state.cache.clone();
     let index_config = state.config.index.clone();
     let job_id = job.job_id.clone();
     let task_job_id = job_id.clone();
@@ -155,6 +156,11 @@ async fn build_index(
             jobs.mark_failed(&task_job_id, e.to_string()).await;
             return;
         }
+        // Invalidate cached results: entries written before the ANN
+        // index existed came from the bounded-scan fallback, which has
+        // degraded recall. Without this, a healthy post-build query
+        // would still serve the old low-recall list.
+        cache.invalidate(&ns);
         jobs.mark_completed(&task_job_id).await;
     });
 
@@ -178,6 +184,7 @@ async fn build_fts_index(
     let table = state.index.get_namespace(&ns).await?;
     let job = state.jobs.create_job(&ns, "fts").await;
     let jobs = state.jobs.clone();
+    let cache = state.cache.clone();
     let job_id = job.job_id.clone();
     let task_job_id = job_id.clone();
     let status_url = format!("/ns/{ns}/index-jobs/{job_id}");
@@ -189,6 +196,9 @@ async fn build_fts_index(
             jobs.mark_failed(&task_job_id, e.to_string()).await;
             return;
         }
+        // FTS + hybrid results cached before this point were produced
+        // without the BM25 index; invalidate so they don't stick.
+        cache.invalidate(&ns);
         jobs.mark_completed(&task_job_id).await;
     });
 

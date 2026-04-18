@@ -78,11 +78,20 @@ impl IndexManager {
     }
 
     /// Drop a namespace.
+    ///
+    /// Returns `NamespaceNotFound` when the table is genuinely absent so
+    /// the HTTP layer can surface a 404 (matching `open`/`get_namespace`);
+    /// other backend failures propagate as `Index`.
     pub async fn drop_namespace(&self, name: &str) -> Result<(), PlumeError> {
         self.connection
             .drop_table(name, &[])
             .await
-            .map_err(|e| PlumeError::Index(format!("failed to drop table {name}: {e}")))?;
+            .map_err(|e| match e {
+                lancedb::Error::TableNotFound { .. } => {
+                    PlumeError::NamespaceNotFound(name.to_string())
+                }
+                other => PlumeError::Index(format!("failed to drop table {name}: {other}")),
+            })?;
 
         let mut tables = self.tables.write().await;
         tables.remove(name);
