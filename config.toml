@@ -40,3 +40,7 @@ nprobes = 20
 # ordering from the candidate pool below. Setting refine_factor adds >10×
 # latency with no e2e recall gain.
 ann_candidate_multiplier = 50
+# Hard ceiling on ANN candidates materialized per query. Every candidate
+# pulls its full multivector for MaxSim rerank, so this bounds per-query
+# memory regardless of `ann_candidate_multiplier * k`.
+max_candidates = 10000

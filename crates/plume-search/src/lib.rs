@@ -45,7 +45,7 @@ impl SearchEngine {
         // Check cache. A cache failure (disk IO, corruption, serialization)
         // is treated as a miss: the cache is an optimization, and a degraded
         // hot tier must not take search offline.
-        let query_hash = hash_query(query_text, mode_str);
+        let query_hash = hash_query(query_text, mode_str, k);
         match self.cache.get(&table.name, query_hash).await {
             Ok(Some(cached)) => {
                 return Ok(QueryResponse {
@@ -91,11 +91,17 @@ impl SearchEngine {
         query_vectors: &MultiVector,
         k: usize,
     ) -> Result<Vec<plume_core::types::SearchResult>, PlumeError> {
+        // `max_candidates` caps memory usage: every candidate pulls its
+        // full multivector for MaxSim rerank, so an unbounded
+        // multiplier*k could OOM. We still guarantee at least `k`
+        // candidates so the search can return the requested number of
+        // hits even when the operator set a tight cap.
         let candidate_limit = self
             .index_config
             .ann_candidate_multiplier
             .saturating_mul(k)
-            .max(k);
+            .max(k)
+            .min(self.index_config.max_candidates.max(k));
 
         // A failing `list_indices` (transient metadata/object-store hiccup)
         // must not take search offline. Treat it as "no ANN index" so we
@@ -113,14 +119,29 @@ impl SearchEngine {
         };
 
         let candidates = if has_ann {
-            table
+            match table
                 .ann_search_with_vectors(
                     query_vectors,
                     candidate_limit,
                     self.index_config.nprobes as usize,
                     self.index_config.refine_factor,
                 )
-                .await?
+                .await
+            {
+                Ok(c) => c,
+                // An ANN index can transiently fail (mid-rebuild, object
+                // store hiccup, corrupt manifest). Falling back to the
+                // bounded scan keeps search available with the same
+                // memory ceiling; operators will see the warn in logs.
+                Err(e) => {
+                    warn!(
+                        namespace = %table.name,
+                        error = %e,
+                        "ANN search failed; falling back to bounded scan"
+                    );
+                    table.scan_with_vectors(candidate_limit).await?
+                }
+            }
         } else {
             // Fallback for early-stage namespaces (pre-`/index`): same
             // candidate cap as the ANN path. Scans only the first

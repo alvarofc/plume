@@ -36,21 +36,28 @@ impl NamespaceTable {
             other => PlumeError::Index(format!("failed to open table {name}: {other}")),
         })?;
 
+        let has_data = table_has_rows(&table).await?;
         Ok(Self {
             name: name.to_string(),
             table: RwLock::new(table),
-            has_rows: std::sync::atomic::AtomicBool::new(true),
+            has_rows: std::sync::atomic::AtomicBool::new(has_data),
         })
     }
 
     /// Open an existing table or create a new one.
+    ///
+    /// Only creates the table when LanceDB reports it as genuinely
+    /// missing; other open errors (permissions, object-store, corrupt
+    /// manifests) propagate as `Index` so we don't silently clobber an
+    /// existing dataset that just failed to load.
     pub async fn open_or_create(conn: &Connection, name: &str) -> Result<Self, PlumeError> {
         let (table, has_data) = match conn.open_table(name).execute().await {
             Ok(t) => {
                 info!(namespace = name, "opened existing table");
-                (t, true)
+                let has_data = table_has_rows(&t).await?;
+                (t, has_data)
             }
-            Err(_) => {
+            Err(lancedb::Error::TableNotFound { .. }) => {
                 let schema = Arc::new(plume_schema());
                 let t = conn
                     .create_empty_table(name, schema)
@@ -60,6 +67,11 @@ impl NamespaceTable {
                         PlumeError::Index(format!("failed to create table {name}: {e}"))
                     })?;
                 (t, false)
+            }
+            Err(e) => {
+                return Err(PlumeError::Index(format!(
+                    "failed to open table {name}: {e}"
+                )));
             }
         };
 
@@ -254,6 +266,19 @@ impl NamespaceTable {
             .await
             .map_err(|e| PlumeError::Index(format!("count failed: {e}")))
     }
+}
+
+/// Check whether an existing LanceDB table has any rows.
+///
+/// Needed because `merge_insert` panics on an empty table, so `upsert`
+/// must take the plain `add` path until at least one row exists. We
+/// call this once at open time rather than on every upsert.
+async fn table_has_rows(table: &Table) -> Result<bool, PlumeError> {
+    let count = table
+        .count_rows(None)
+        .await
+        .map_err(|e| PlumeError::Index(format!("count rows failed: {e}")))?;
+    Ok(count > 0)
 }
 
 /// Parse Arrow RecordBatch stream into SearchResults.

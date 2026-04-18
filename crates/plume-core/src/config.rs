@@ -103,6 +103,12 @@ pub struct IndexConfig {
     pub refine_factor: Option<u32>,
     #[serde(default = "default_ann_candidate_multiplier")]
     pub ann_candidate_multiplier: usize,
+    /// Hard ceiling on ANN candidates materialized per query. Every
+    /// candidate pulls its full multivector into memory for MaxSim
+    /// rerank, so without a cap a pathological `k` combined with a
+    /// large `ann_candidate_multiplier` could OOM the process.
+    #[serde(default = "default_max_candidates")]
+    pub max_candidates: usize,
 }
 
 impl Default for IndexConfig {
@@ -113,6 +119,7 @@ impl Default for IndexConfig {
             nprobes: default_nprobes(),
             refine_factor: None,
             ann_candidate_multiplier: default_ann_candidate_multiplier(),
+            max_candidates: default_max_candidates(),
         }
     }
 }
@@ -180,4 +187,9 @@ fn default_nprobes() -> u32 {
 }
 fn default_ann_candidate_multiplier() -> usize {
     50
+}
+fn default_max_candidates() -> usize {
+    // Bounded at ~2x the default multiplier*k=50*100=5000; operators
+    // can raise this in `config.toml` for large-corpus recall sweeps.
+    10_000
 }

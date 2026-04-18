@@ -350,6 +350,7 @@ async fn main() -> Result<()> {
             nprobes: 32,
             refine_factor: None,
             ann_candidate_multiplier: 20,
+            max_candidates: 10_000,
         };
         let table = index_manager.namespace(namespace).await?;
         let index_start = Instant::now();

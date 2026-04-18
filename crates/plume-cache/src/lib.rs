@@ -15,6 +15,11 @@ use tracing::info;
 
 pub use generation::GenerationCounter;
 
+/// Dedicated subdirectory under `CacheConfig::nvme_path` that plume owns and
+/// wipes on startup. Keeping wipes scoped to this subdir means a
+/// misconfigured parent path cannot take out unrelated files.
+const CACHE_SUBDIR: &str = "plume-search-cache";
+
 /// Cache key: (namespace, generation, query_hash).
 /// Generation counter ensures stale results are never served after writes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -87,35 +92,46 @@ impl SearchCache {
         }
 
         let nvme_bytes = config.nvme_capacity_gb * 1024 * 1024 * 1024;
-        let nvme_path = Path::new(&config.nvme_path);
+        let nvme_root = Path::new(&config.nvme_path);
 
-        // Wipe any prior cache contents: generation counters are in-memory,
-        // so persisted entries from a previous process would collide with
-        // freshly-issued (namespace, generation=0) keys and could be served
-        // as stale hits. See doc comment on `SearchCache`.
-        if nvme_path.exists() {
-            std::fs::remove_dir_all(nvme_path).map_err(|e| {
+        // Own a dedicated subdirectory under the configured path. We wipe
+        // this on startup (generation counters are in-memory, so stale
+        // persisted entries could collide with fresh keys after restart),
+        // and we never touch anything outside it — a misconfigured
+        // nvme_path (e.g. pointing at a shared directory) cannot cause
+        // plume to recursively delete unrelated data.
+        let cache_dir = nvme_root.join(CACHE_SUBDIR);
+
+        std::fs::create_dir_all(nvme_root).map_err(|e| {
+            PlumeError::Cache(format!(
+                "failed to create cache parent {}: {e}",
+                nvme_root.display()
+            ))
+        })?;
+
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir).map_err(|e| {
                 PlumeError::Cache(format!(
                     "failed to clear cache directory {}: {e}",
-                    nvme_path.display()
+                    cache_dir.display()
                 ))
             })?;
         }
 
-        std::fs::create_dir_all(nvme_path).map_err(|e| {
+        std::fs::create_dir_all(&cache_dir).map_err(|e| {
             PlumeError::Cache(format!(
                 "failed to create cache directory {}: {e}",
-                nvme_path.display()
+                cache_dir.display()
             ))
         })?;
 
-        let device = FsDeviceBuilder::new(nvme_path)
+        let device = FsDeviceBuilder::new(&cache_dir)
             .with_capacity(nvme_bytes)
             .build()
             .map_err(|e| {
                 PlumeError::Cache(format!(
                     "failed to initialize NVMe cache device at {}: {e}",
-                    nvme_path.display()
+                    cache_dir.display()
                 ))
             })?;
 
@@ -137,7 +153,7 @@ impl SearchCache {
         info!(
             ram_mb = config.ram_capacity_mb,
             nvme_gb = config.nvme_capacity_gb,
-            nvme_path = %nvme_path.display(),
+            nvme_path = %cache_dir.display(),
             "search cache initialized"
         );
 
@@ -205,10 +221,18 @@ impl SearchCache {
         self.generations.increment(namespace);
     }
 
-    /// Remove a namespace's generation counter entirely.
-    /// Call this when a namespace is dropped to prevent counter leaks.
+    /// Mark a namespace as dropped for cache purposes.
+    ///
+    /// We bump the generation instead of removing the counter: cache
+    /// entries written under the old namespace are not actively evicted
+    /// (foyer has no prefix-delete). If we reset the counter to 0 and
+    /// the namespace was recreated and re-populated, the first write
+    /// would set generation back to 1 and start matching those old
+    /// entries, serving stale results. Keeping the counter monotonic
+    /// guarantees every future generation is strictly greater than any
+    /// previously-cached generation, so stale entries can never match.
     pub fn remove_namespace(&self, namespace: &str) {
-        self.generations.remove(namespace);
+        self.generations.increment(namespace);
     }
 
     /// Get cache statistics.
@@ -237,11 +261,16 @@ pub struct CacheStats {
     pub misses: u64,
 }
 
-/// Hash a query string + search mode into a u64 for cache keying.
-pub fn hash_query(query: &str, mode: &str) -> u64 {
+/// Hash a query string + search mode + k into a u64 for cache keying.
+///
+/// `k` is part of the key because the cache stores the truncated top-k
+/// result list; reusing a k=5 entry for a k=50 request would silently
+/// return fewer rows than the caller asked for.
+pub fn hash_query(query: &str, mode: &str, k: usize) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     query.hash(&mut hasher);
     mode.hash(&mut hasher);
+    k.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -292,7 +321,7 @@ mod tests {
     async fn returns_cached_results() {
         let dir = TempDir::new().unwrap();
         let cache = SearchCache::new(&test_config(&dir)).await.unwrap();
-        let query_hash = hash_query("retry", "semantic");
+        let query_hash = hash_query("retry", "semantic", 5);
 
         cache.insert("code", query_hash, sample_results());
 
@@ -305,7 +334,7 @@ mod tests {
     async fn generation_invalidation_skips_stale_entries() {
         let dir = TempDir::new().unwrap();
         let cache = SearchCache::new(&test_config(&dir)).await.unwrap();
-        let query_hash = hash_query("retry", "semantic");
+        let query_hash = hash_query("retry", "semantic", 5);
 
         cache.insert("code", query_hash, sample_results());
         cache.invalidate("code");
@@ -323,7 +352,7 @@ mod tests {
             nvme_path: "/nonexistent/unwritable".to_string(),
         };
         let cache = SearchCache::new(&config).await.unwrap();
-        let query_hash = hash_query("retry", "semantic");
+        let query_hash = hash_query("retry", "semantic", 5);
 
         cache.insert("code", query_hash, sample_results());
 
@@ -341,7 +370,7 @@ mod tests {
         // must therefore drop any prior NVMe contents on startup.
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        let query_hash = hash_query("retry", "semantic");
+        let query_hash = hash_query("retry", "semantic", 5);
 
         let cache = SearchCache::new(&config).await.unwrap();
         cache.insert("code", query_hash, sample_results());

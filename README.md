@@ -208,6 +208,7 @@ num_partitions = 64           # IVF partition count (omit to let LanceDB auto-se
 nprobes = 16                  # Number of IVF partitions to probe at query time
 # refine_factor = 2           # Optional PQ refine stage (helps recall at scale, ~10% latency cost)
 ann_candidate_multiplier = 10 # Retrieve k * multiplier ANN candidates before MaxSim rerank
+max_candidates = 10000        # Hard cap on candidates materialized per query (OOM guard)
 ```
 
 ## Search modes
