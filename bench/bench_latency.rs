@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use plume_cache::SearchCache;
-use plume_core::config::{CacheConfig, StorageConfig};
-use plume_core::types::{SearchMode, UpsertRequest, Document};
+use plume_core::config::{CacheConfig, IndexConfig, StorageConfig};
+use plume_core::types::{Document, SearchMode};
 use plume_encoder::{Encode, MockEncoder};
 use plume_index::IndexManager;
 use plume_search::SearchEngine;
@@ -55,9 +55,7 @@ fn generate_documents(n: usize) -> Vec<Document> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("warn")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("warn").init();
 
     let doc_counts = [100, 1_000, 10_000];
     let pool_factor = 2;
@@ -85,10 +83,11 @@ async fn main() -> anyhow::Result<()> {
             nvme_capacity_gb: 1,
             nvme_path: "/tmp/plume-bench-cache".into(),
         };
+        let index_config = IndexConfig::default();
 
         let index = IndexManager::connect(&storage_config).await?;
-        let cache = Arc::new(SearchCache::new(&cache_config)?);
-        let engine = SearchEngine::new(Arc::clone(&cache));
+        let cache = Arc::new(SearchCache::new(&cache_config).await?);
+        let engine = SearchEngine::new(Arc::clone(&cache), index_config.clone());
         let encoder = MockEncoder::new(pool_factor);
 
         let docs = generate_documents(n);
@@ -111,9 +110,16 @@ async fn main() -> anyhow::Result<()> {
 
         let ingest_ms = start.elapsed().as_millis();
         let ingest_per_doc = ingest_ms as f64 / n as f64;
-        println!("  Ingest:     {}ms total ({:.2}ms/doc)", ingest_ms, ingest_per_doc);
+        println!(
+            "  Ingest:     {}ms total ({:.2}ms/doc)",
+            ingest_ms, ingest_per_doc
+        );
 
         let table = index.namespace("bench").await?;
+        let start = Instant::now();
+        table.build_vector_index(&index_config).await?;
+        let index_build_ms = start.elapsed().as_millis();
+        println!("  ANN index:  {}ms build", index_build_ms);
 
         // --- Cold query benchmark (cache miss) ---
         let query = "retry logic with exponential backoff";
@@ -158,10 +164,7 @@ async fn main() -> anyhow::Result<()> {
             .await?;
         let reinvalidate_us = start.elapsed().as_micros();
         assert!(!result.cache_hit, "expected cache miss after invalidation");
-        println!(
-            "  Post-invalidation query: {}us",
-            reinvalidate_us,
-        );
+        println!("  Post-invalidation query: {}us", reinvalidate_us,);
 
         let stats = cache.stats();
         println!(

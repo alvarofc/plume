@@ -17,6 +17,9 @@ pub enum PlumeError {
     #[error("namespace not found: {0}")]
     NamespaceNotFound(String),
 
+    #[error("not found: {0}")]
+    NotFound(String),
+
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
@@ -30,7 +33,7 @@ pub enum PlumeError {
 impl PlumeError {
     pub fn status_code(&self) -> u16 {
         match self {
-            PlumeError::NamespaceNotFound(_) => 404,
+            PlumeError::NamespaceNotFound(_) | PlumeError::NotFound(_) => 404,
             PlumeError::InvalidRequest(_) => 400,
             _ => 500,
         }

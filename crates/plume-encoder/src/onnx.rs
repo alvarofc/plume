@@ -1,10 +1,12 @@
 use std::path::Path;
+use std::sync::Mutex;
 
 use ndarray::Array2;
-use ort::{session::Session, value::Value};
+use ort::session::Session;
+use ort::value::Tensor;
 use plume_core::config::EncoderConfig;
 use plume_core::error::PlumeError;
-use plume_core::types::{MultiVector, EMBEDDING_DIM};
+use plume_core::types::MultiVector;
 use tokenizers::Tokenizer;
 use tracing::info;
 
@@ -13,8 +15,9 @@ use crate::pool::pool_vectors;
 /// ColBERT-style encoder that produces multi-vector (token-level) embeddings.
 ///
 /// Wraps an ONNX model (e.g. LateOn-Code-edge) and HuggingFace tokenizer.
+/// Session is behind a Mutex because ort 2.0 requires `&mut self` for `run()`.
 pub struct Encoder {
-    session: Session,
+    session: Mutex<Session>,
     tokenizer: Tokenizer,
     pool_factor: usize,
 }
@@ -55,7 +58,7 @@ impl Encoder {
         info!("encoder loaded from {}", model_dir.display());
 
         Ok(Self {
-            session,
+            session: Mutex::new(session),
             tokenizer,
             pool_factor: 2,
         })
@@ -82,7 +85,11 @@ impl Encoder {
             .map_err(|e| PlumeError::Encoder(format!("tokenization failed: {e}")))?;
 
         let batch_size = encodings.len();
-        let max_len = encodings.iter().map(|e| e.get_ids().len()).max().unwrap_or(0);
+        let max_len = encodings
+            .iter()
+            .map(|e| e.get_ids().len())
+            .max()
+            .unwrap_or(0);
 
         // Build input tensors: input_ids and attention_mask
         let mut input_ids = vec![0i64; batch_size * max_len];
@@ -97,45 +104,49 @@ impl Encoder {
             }
         }
 
-        let input_ids_array =
-            ndarray::Array2::from_shape_vec((batch_size, max_len), input_ids)
-                .map_err(|e| PlumeError::Encoder(format!("shape error: {e}")))?;
+        let input_ids_array = ndarray::Array2::from_shape_vec((batch_size, max_len), input_ids)
+            .map_err(|e| PlumeError::Encoder(format!("shape error: {e}")))?;
 
         let attention_mask_array =
             ndarray::Array2::from_shape_vec((batch_size, max_len), attention_mask)
                 .map_err(|e| PlumeError::Encoder(format!("shape error: {e}")))?;
 
-        let input_ids_value = Value::from_array(input_ids_array.view())
+        let input_ids_tensor = Tensor::from_array(input_ids_array)
             .map_err(|e| PlumeError::Encoder(format!("tensor creation failed: {e}")))?;
-        let attention_mask_value = Value::from_array(attention_mask_array.view())
+        let attention_mask_tensor = Tensor::from_array(attention_mask_array)
             .map_err(|e| PlumeError::Encoder(format!("tensor creation failed: {e}")))?;
 
-        let outputs = self
+        let mut session = self
             .session
-            .run(ort::inputs![input_ids_value, attention_mask_value].map_err(|e| {
-                PlumeError::Encoder(format!("input creation failed: {e}"))
-            })?)
+            .lock()
+            .map_err(|e| PlumeError::Encoder(format!("session lock poisoned: {e}")))?;
+
+        let outputs = session
+            .run(ort::inputs![input_ids_tensor, attention_mask_tensor])
             .map_err(|e| PlumeError::Encoder(format!("inference failed: {e}")))?;
 
         // Output shape: [batch_size, seq_len, embedding_dim]
-        let output_tensor = outputs[0]
-            .try_extract_tensor::<f32>()
+        let output_view = outputs[0]
+            .try_extract_array::<f32>()
             .map_err(|e| PlumeError::Encoder(format!("output extraction failed: {e}")))?;
 
-        let shape = output_tensor.shape();
+        let shape = output_view.shape();
         let embedding_dim = shape[2];
 
-        let output_array = output_tensor
+        let output_array = output_view
             .to_shape((batch_size, max_len, embedding_dim))
             .map_err(|e| PlumeError::Encoder(format!("reshape failed: {e}")))?;
 
         let mut results = Vec::with_capacity(batch_size);
 
         for (i, encoding) in encodings.iter().enumerate() {
-            let seq_len = encoding.get_attention_mask().iter().filter(|&&m| m == 1).count();
-            let token_embeddings: Array2<f32> = output_array
-                .slice(ndarray::s![i, ..seq_len, ..])
-                .to_owned();
+            let seq_len = encoding
+                .get_attention_mask()
+                .iter()
+                .filter(|&&m| m == 1)
+                .count();
+            let token_embeddings: Array2<f32> =
+                output_array.slice(ndarray::s![i, ..seq_len, ..]).to_owned();
 
             let normalized = l2_normalize_rows(&token_embeddings);
 

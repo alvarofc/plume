@@ -70,10 +70,38 @@ pub struct UpsertResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexResponse {
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_type: Option<String>,
+}
+
+/// Async index job status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexJobStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+}
+
+/// Poll response for an async index job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexJobResponse {
+    pub job_id: String,
+    pub namespace: String,
+    pub index_type: String,
+    pub status: IndexJobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Embedding dimensions for ColBERT-style models.
-pub const EMBEDDING_DIM: usize = 128;
+/// LateOn-Code-edge uses 48-dim output after the ColBERT linear projection.
+pub const EMBEDDING_DIM: usize = 48;
 
 // --- Input validation limits ---
 
@@ -88,6 +116,47 @@ pub const MAX_TEXT_LENGTH: usize = 1_000_000;
 
 /// Maximum namespace name length.
 pub const MAX_NAMESPACE_LENGTH: usize = 64;
+
+/// Collapse a ColBERT multi-vector into a single normalized vector for ANN candidate retrieval.
+///
+/// This is used only to generate candidates. Final semantic ranking still uses
+/// token-level MaxSim over the full multi-vector representation.
+pub fn ann_vector(multivector: &MultiVector) -> Result<Vec<f32>, String> {
+    if multivector.is_empty() {
+        return Err("multivector must contain at least one token vector".into());
+    }
+
+    let mut pooled = vec![0.0f32; EMBEDDING_DIM];
+
+    for token in multivector {
+        if token.len() != EMBEDDING_DIM {
+            return Err(format!(
+                "expected embedding dim {EMBEDDING_DIM}, got {}",
+                token.len()
+            ));
+        }
+
+        for (dst, value) in pooled.iter_mut().zip(token.iter()) {
+            *dst += *value;
+        }
+    }
+
+    let count = multivector.len() as f32;
+    for value in &mut pooled {
+        *value /= count;
+    }
+
+    let norm = pooled.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm <= 1e-12 {
+        return Err("pooled ANN vector has zero norm".into());
+    }
+
+    for value in &mut pooled {
+        *value /= norm;
+    }
+
+    Ok(pooled)
+}
 
 /// Validate that a namespace name is safe (alphanumeric, hyphens, underscores).
 pub fn validate_namespace(name: &str) -> Result<(), String> {
@@ -107,4 +176,38 @@ pub fn validate_namespace(name: &str) -> Result<(), String> {
         return Err("namespace must be alphanumeric, hyphens, or underscores".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ann_vector_normalizes_mean_embedding() {
+        let pooled = ann_vector(&vec![vec![1.0; EMBEDDING_DIM], vec![1.0; EMBEDDING_DIM]])
+            .expect("ann vector");
+
+        let norm = pooled.iter().map(|value| value * value).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+        assert!(pooled.iter().all(|value| *value > 0.0));
+    }
+
+    #[test]
+    fn ann_vector_rejects_empty_multivector() {
+        let err = ann_vector(&Vec::new()).unwrap_err();
+        assert!(err.contains("at least one token vector"));
+    }
+
+    #[test]
+    fn validate_namespace_accepts_safe_names() {
+        assert!(validate_namespace("code").is_ok());
+        assert!(validate_namespace("code-search_01").is_ok());
+    }
+
+    #[test]
+    fn validate_namespace_rejects_invalid_names() {
+        assert!(validate_namespace("").is_err());
+        assert!(validate_namespace("contains space").is_err());
+        assert!(validate_namespace("slash/name").is_err());
+    }
 }

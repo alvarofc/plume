@@ -1,3 +1,4 @@
+mod jobs;
 mod routes;
 mod state;
 
@@ -12,6 +13,7 @@ use plume_search::SearchEngine;
 use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter};
 
+use jobs::IndexJobRegistry;
 use state::AppState;
 
 #[tokio::main]
@@ -26,8 +28,8 @@ async fn main() -> anyhow::Result<()> {
     info!("starting Plume v{}", env!("CARGO_PKG_VERSION"));
 
     let index_manager = IndexManager::connect(&config.storage).await?;
-    let cache = Arc::new(SearchCache::new(&config.cache)?);
-    let search_engine = SearchEngine::new(Arc::clone(&cache));
+    let cache = Arc::new(SearchCache::new(&config.cache).await?);
+    let search_engine = SearchEngine::new(Arc::clone(&cache), config.index.clone());
     let encoder = build_encoder(&config.encoder);
 
     let state = AppState {
@@ -36,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
         cache,
         search: Arc::new(search_engine),
         encoder: Arc::from(encoder),
+        jobs: Arc::new(IndexJobRegistry::new()),
     };
 
     let app = routes::router(state);

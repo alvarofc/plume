@@ -10,5 +10,3 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-arrow-schema = { workspace = true }
-arrow-array = { workspace = true }

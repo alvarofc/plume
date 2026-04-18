@@ -9,11 +9,7 @@ use plume_core::types::SearchResult;
 ///
 /// where k=60 is the standard constant. This gives balanced fusion without
 /// needing score normalization across different retrieval methods.
-pub fn rrf_fusion(
-    semantic: &[SearchResult],
-    fts: &[SearchResult],
-    k: usize,
-) -> Vec<SearchResult> {
+pub fn rrf_fusion(semantic: &[SearchResult], fts: &[SearchResult], k: usize) -> Vec<SearchResult> {
     const RRF_K: f32 = 60.0;
 
     // Map: document id → (rrf_score, best SearchResult)

@@ -25,7 +25,7 @@ plume-index = { path = "crates/plume-index" }
 plume-search = { path = "crates/plume-search" }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
 
 # Web framework
 axum = "0.8"
@@ -39,28 +39,24 @@ toml = "0.8"
 bincode = "2"
 
 # Storage
-lancedb = { version = "0.27", features = ["aws", "gcs"] }
+# Keep the workspace default lean; cloud backends are opt-in in leaf crates.
+lancedb = { version = "0.27" }
 arrow = { version = "57", features = ["json"] }
 arrow-array = "57"
 arrow-schema = "57"
 arrow-buffer = "57"
 
-# Object store
-object_store = { version = "0.11", features = ["aws", "gcp"] }
-
 # Cache
-foyer = "0.22"
+foyer = { version = "0.22", features = ["serde"] }
 
 # ONNX
 ort = "2.0.0-rc.12"
 tokenizers = "0.21"
-ndarray = "0.16"
+ndarray = "0.17"
 
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
 
 # Error handling
 thiserror = "2"
@@ -70,6 +66,7 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

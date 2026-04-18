@@ -58,11 +58,7 @@ mod tests {
 
     #[test]
     fn test_pool_odd_tokens() {
-        let embeddings = array![
-            [1.0, 2.0],
-            [3.0, 4.0],
-            [5.0, 6.0],
-        ];
+        let embeddings = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0],];
 
         let pooled = pool_vectors(&embeddings, 2);
         assert_eq!(pooled.dim(), (2, 2));

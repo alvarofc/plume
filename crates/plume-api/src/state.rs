@@ -1,3 +1,5 @@
+use crate::jobs::IndexJobRegistry;
+
 use std::sync::Arc;
 
 use plume_cache::SearchCache;
@@ -14,4 +16,5 @@ pub struct AppState {
     pub cache: Arc<SearchCache>,
     pub search: Arc<SearchEngine>,
     pub encoder: Arc<dyn Encode>,
+    pub jobs: Arc<IndexJobRegistry>,
 }

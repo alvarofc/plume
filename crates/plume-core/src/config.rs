@@ -53,10 +53,10 @@ impl Default for StorageConfig {
 pub struct CacheConfig {
     #[serde(default = "default_ram_capacity_mb")]
     pub ram_capacity_mb: usize,
-    /// NVMe L2 cache capacity. Reserved for future use — not yet implemented.
+    /// NVMe/disk cache capacity for the persistent L2 tier.
     #[serde(default = "default_nvme_capacity_gb")]
     pub nvme_capacity_gb: usize,
-    /// NVMe L2 cache path. Reserved for future use — not yet implemented.
+    /// Filesystem path used by the persistent L2 tier.
     #[serde(default = "default_nvme_path")]
     pub nvme_path: String,
 }
@@ -95,15 +95,31 @@ impl Default for EncoderConfig {
 pub struct IndexConfig {
     #[serde(default = "default_nbits")]
     pub nbits: u32,
+    #[serde(default)]
+    pub num_partitions: Option<u32>,
     #[serde(default = "default_nprobes")]
     pub nprobes: u32,
+    #[serde(default)]
+    pub refine_factor: Option<u32>,
+    #[serde(default = "default_ann_candidate_multiplier")]
+    pub ann_candidate_multiplier: usize,
+    /// Hard ceiling on ANN candidates materialized per query. Every
+    /// candidate pulls its full multivector into memory for MaxSim
+    /// rerank, so without a cap a pathological `k` combined with a
+    /// large `ann_candidate_multiplier` could OOM the process.
+    #[serde(default = "default_max_candidates")]
+    pub max_candidates: usize,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             nbits: default_nbits(),
+            num_partitions: None,
             nprobes: default_nprobes(),
+            refine_factor: None,
+            ann_candidate_multiplier: default_ann_candidate_multiplier(),
+            max_candidates: default_max_candidates(),
         }
     }
 }
@@ -143,7 +159,7 @@ fn default_port() -> u16 {
     3000
 }
 fn default_storage_uri() -> String {
-    "s3://plume/data".into()
+    "./data/lancedb".into()
 }
 fn default_ram_capacity_mb() -> usize {
     2048
@@ -152,7 +168,7 @@ fn default_nvme_capacity_gb() -> usize {
     50
 }
 fn default_nvme_path() -> String {
-    "/var/cache/plume".into()
+    "./data/plume-cache".into()
 }
 fn default_model() -> String {
     "lightonai/LateOn-Code-edge".into()
@@ -164,8 +180,16 @@ fn default_batch_size() -> usize {
     32
 }
 fn default_nbits() -> u32 {
-    4
+    8
 }
 fn default_nprobes() -> u32 {
-    32
+    20
+}
+fn default_ann_candidate_multiplier() -> usize {
+    50
+}
+fn default_max_candidates() -> usize {
+    // Bounded at ~2x the default multiplier*k=50*100=5000; operators
+    // can raise this in `config.toml` for large-corpus recall sweeps.
+    10_000
 }

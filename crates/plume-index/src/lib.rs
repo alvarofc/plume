@@ -22,6 +22,8 @@ pub struct IndexManager {
 impl IndexManager {
     /// Connect to LanceDB at the given storage URI.
     pub async fn connect(config: &StorageConfig) -> Result<Self, PlumeError> {
+        validate_storage_backend(&config.uri)?;
+
         let builder = lancedb::connect(&config.uri);
 
         let connection = builder
@@ -65,24 +67,31 @@ impl IndexManager {
             }
         }
 
-        // Try to open the table — if it doesn't exist, return 404
-        match NamespaceTable::open(&self.connection, name).await {
-            Ok(ns_table) => {
-                let ns_table = Arc::new(ns_table);
-                let mut tables = self.tables.write().await;
-                tables.insert(name.to_string(), Arc::clone(&ns_table));
-                Ok(ns_table)
-            }
-            Err(_) => Err(PlumeError::NamespaceNotFound(name.to_string())),
-        }
+        // `NamespaceTable::open` maps `TableNotFound` to
+        // `PlumeError::NamespaceNotFound` and propagates other failures
+        // (permissions, object-store, corruption) as `PlumeError::Index`.
+        let ns_table = NamespaceTable::open(&self.connection, name).await?;
+        let ns_table = Arc::new(ns_table);
+        let mut tables = self.tables.write().await;
+        tables.insert(name.to_string(), Arc::clone(&ns_table));
+        Ok(ns_table)
     }
 
     /// Drop a namespace.
+    ///
+    /// Returns `NamespaceNotFound` when the table is genuinely absent so
+    /// the HTTP layer can surface a 404 (matching `open`/`get_namespace`);
+    /// other backend failures propagate as `Index`.
     pub async fn drop_namespace(&self, name: &str) -> Result<(), PlumeError> {
         self.connection
             .drop_table(name, &[])
             .await
-            .map_err(|e| PlumeError::Index(format!("failed to drop table {name}: {e}")))?;
+            .map_err(|e| match e {
+                lancedb::Error::TableNotFound { .. } => {
+                    PlumeError::NamespaceNotFound(name.to_string())
+                }
+                other => PlumeError::Index(format!("failed to drop table {name}: {other}")),
+            })?;
 
         let mut tables = self.tables.write().await;
         tables.remove(name);
@@ -98,5 +107,52 @@ impl IndexManager {
             .execute()
             .await
             .map_err(|e| PlumeError::Index(format!("failed to list tables: {e}")))
+    }
+}
+
+fn validate_storage_backend(uri: &str) -> Result<(), PlumeError> {
+    if uri.starts_with("s3://") {
+        #[cfg(not(feature = "storage-aws"))]
+        {
+            return Err(PlumeError::Config(
+                "s3:// storage requires the `storage-aws` feature. Rebuild with `cargo build -p plume-api --bin plume --features storage-aws`.".into(),
+            ));
+        }
+    }
+
+    if uri.starts_with("gs://") {
+        #[cfg(not(feature = "storage-gcs"))]
+        {
+            return Err(PlumeError::Config(
+                "gs:// storage requires the `storage-gcs` feature. Rebuild with `cargo build -p plume-api --bin plume --features storage-gcs`.".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_storage_backend;
+
+    #[test]
+    fn local_storage_is_always_supported() {
+        assert!(validate_storage_backend("./data/lancedb").is_ok());
+        assert!(validate_storage_backend("/tmp/plume").is_ok());
+    }
+
+    #[cfg(not(feature = "storage-aws"))]
+    #[test]
+    fn s3_storage_requires_feature() {
+        let err = validate_storage_backend("s3://plume/data").unwrap_err();
+        assert!(err.to_string().contains("storage-aws"));
+    }
+
+    #[cfg(not(feature = "storage-gcs"))]
+    #[test]
+    fn gcs_storage_requires_feature() {
+        let err = validate_storage_backend("gs://plume/data").unwrap_err();
+        assert!(err.to_string().contains("storage-gcs"));
     }
 }
