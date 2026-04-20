@@ -159,6 +159,13 @@ export ORT_DYLIB_PATH=/usr/local/opt/onnxruntime/lib/libonnxruntime.dylib
 
 Pointing `storage.uri` at `s3://` or `gs://` without the matching feature fails fast with a rebuild hint rather than a vague backend error.
 
+## Prior art
+
+Plume stands on the shoulders of two projects worth reading if you want to go deeper:
+
+- [`lightonai/next-plaid`](https://github.com/lightonai/next-plaid) — the local-first multi-vector engine behind **ColGREP**. The canonical reference for late-interaction retrieval, quantization, and memory-mapped indexing.
+- [`gordonmurray/firnflow`](https://github.com/gordonmurray/firnflow) — a close reference for the RAM → NVMe → object-storage tiering we're building on top of LanceDB and Foyer.
+
 ## More
 
 - Operator setup, toolchain notes, and CI commands: [`AGENTS.md`](AGENTS.md)

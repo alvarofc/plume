@@ -12,7 +12,12 @@ nvme_capacity_gb = 1
 nvme_path = "/tmp/plume-cache"
 
 [encoder]
-model = "lightonai/LateOn-Code-edge"
+# Local path to the downloaded ONNX model dir. The encoder loader probes
+# `{model}/model.onnx` + `{model}/tokenizer.json` and silently falls back
+# to MockEncoder if either is missing — a HF repo id here (e.g.
+# `lightonai/LateOn-Code-edge`) would look right but would produce
+# meaningless embeddings. Run `bash scripts/download-model.sh` to populate.
+model = "./models/lateon-code-edge"
 pool_factor = 2
 batch_size = 32
 
