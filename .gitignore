@@ -6,5 +6,6 @@
 *.onnx
 /models/
 /data/
+/cache/
 .context/
 .claude/
