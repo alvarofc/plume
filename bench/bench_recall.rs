@@ -336,9 +336,7 @@ async fn main() -> Result<()> {
             let metadata: Vec<HashMap<String, serde_json::Value>> =
                 chunk.iter().map(|_| HashMap::new()).collect();
             let table = index_manager.namespace(namespace).await?;
-            table
-                .upsert(&ids, &texts, &multivectors, &metadata)
-                .await?;
+            table.upsert(&ids, &texts, &multivectors, &metadata).await?;
         }
         let ingest_ms = ingest_start.elapsed().as_secs_f64() * 1000.0;
         println!("  Ingested in {:.1}s", ingest_ms / 1000.0);
@@ -351,6 +349,7 @@ async fn main() -> Result<()> {
             refine_factor: None,
             ann_candidate_multiplier: 20,
             max_candidates: 10_000,
+            auto: Default::default(),
         };
         let table = index_manager.namespace(namespace).await?;
         let index_start = Instant::now();
@@ -360,7 +359,10 @@ async fn main() -> Result<()> {
         let total_docs = table.count().await?;
 
         // --- Encode queries and compute exact baselines ---
-        println!("  Computing exact baselines for {} queries...", test_queries.len());
+        println!(
+            "  Computing exact baselines for {} queries...",
+            test_queries.len()
+        );
         let mut baselines: Vec<(String, MultiVector, Vec<SearchResult>)> = Vec::new();
         let mut exact_latencies_ms = Vec::new();
 
@@ -409,15 +411,12 @@ async fn main() -> Result<()> {
 
                     let avg_ann_recall =
                         ann_recalls.iter().sum::<f64>() / ann_recalls.len().max(1) as f64;
-                    let min_ann_recall = ann_recalls
-                        .iter()
-                        .cloned()
-                        .fold(f64::INFINITY, f64::min);
+                    let min_ann_recall = ann_recalls.iter().cloned().fold(f64::INFINITY, f64::min);
                     let avg_latency_ms =
                         latencies_ms.iter().sum::<f64>() / latencies_ms.len().max(1) as f64;
                     let p95_latency_ms = percentile_ms(&mut latencies_ms, 0.95);
-                    let avg_e2e_exact =
-                        e2e_exact_recalls.iter().sum::<f64>() / e2e_exact_recalls.len().max(1) as f64;
+                    let avg_e2e_exact = e2e_exact_recalls.iter().sum::<f64>()
+                        / e2e_exact_recalls.len().max(1) as f64;
                     let avg_e2e_ann =
                         e2e_ann_recalls.iter().sum::<f64>() / e2e_ann_recalls.len().max(1) as f64;
 

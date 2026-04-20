@@ -4,12 +4,12 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use plume_core::types::{
-    validate_namespace, IndexResponse, QueryRequest, UpsertRequest, UpsertResponse, MAX_K,
-    MAX_ROWS_PER_UPSERT, MAX_TEXT_LENGTH,
+    validate_namespace, DeleteDocsRequest, IndexResponse, NamespacesResponse, QueryRequest,
+    UpsertRequest, UpsertResponse, MAX_K, MAX_ROWS_PER_UPSERT, MAX_TEXT_LENGTH,
 };
 use serde_json::json;
 use tracing::{error, info};
@@ -20,19 +20,29 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
+        .route("/ns", get(list_namespaces))
         .route("/ns/{ns}/upsert", post(upsert))
+        .route("/ns/{ns}/docs", axum::routing::delete(delete_docs))
         .route("/ns/{ns}/query", post(query))
         .route("/ns/{ns}/index", post(build_index))
         .route("/ns/{ns}/fts-index", post(build_fts_index))
         .route("/ns/{ns}/index-jobs/{job_id}", get(get_index_job))
         .route("/ns/{ns}/warmup", post(warmup))
-        .route("/ns/{ns}", delete(drop_namespace))
+        .route("/ns/{ns}", post(create_namespace).delete(drop_namespace))
         .with_state(state)
 }
 
-/// GET /health — liveness check.
-async fn health() -> impl IntoResponse {
-    Json(json!({"status": "ok"}))
+/// GET /health — liveness + encoder identity.
+///
+/// The `encoder` field lets CLI clients warn when the server is running
+/// the mock encoder (embeddings are deterministic nonsense, semantic
+/// search is useless). Always `"mock"` or `"onnx:{model}"`.
+async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    Json(json!({
+        "status": "ok",
+        "encoder": state.encoder.kind(),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 /// GET /metrics — Prometheus exposition format.
@@ -98,6 +108,10 @@ async fn upsert(
     // Invalidate cache for this namespace
     state.cache.invalidate(&ns);
 
+    // Schedule a background ANN + FTS rebuild. The scheduler debounces
+    // bursts so rapid upserts coalesce into one rebuild per namespace.
+    state.auto_index.notify_upsert(&ns, count).await;
+
     Ok(Json(UpsertResponse { upserted: count }))
 }
 
@@ -144,6 +158,7 @@ async fn build_index(
     let job = state.jobs.create_job(&ns, "vector").await;
     let jobs = state.jobs.clone();
     let cache = state.cache.clone();
+    let auto_index = state.auto_index.clone();
     let index_config = state.config.index.clone();
     let job_id = job.job_id.clone();
     let task_job_id = job_id.clone();
@@ -161,6 +176,9 @@ async fn build_index(
         // degraded recall. Without this, a healthy post-build query
         // would still serve the old low-recall list.
         cache.invalidate(&ns);
+        // Persist the count marker so a restart doesn't re-queue the
+        // rebuild we just finished by hand.
+        auto_index.record_manual_build(&ns).await;
         jobs.mark_completed(&task_job_id).await;
     });
 
@@ -185,6 +203,7 @@ async fn build_fts_index(
     let job = state.jobs.create_job(&ns, "fts").await;
     let jobs = state.jobs.clone();
     let cache = state.cache.clone();
+    let auto_index = state.auto_index.clone();
     let job_id = job.job_id.clone();
     let task_job_id = job_id.clone();
     let status_url = format!("/ns/{ns}/index-jobs/{job_id}");
@@ -199,6 +218,9 @@ async fn build_fts_index(
         // FTS + hybrid results cached before this point were produced
         // without the BM25 index; invalidate so they don't stick.
         cache.invalidate(&ns);
+        // Persist the count marker so a restart doesn't re-queue the
+        // rebuild we just finished by hand.
+        auto_index.record_manual_build(&ns).await;
         jobs.mark_completed(&task_job_id).await;
     });
 
@@ -249,12 +271,65 @@ async fn warmup(
     ))
 }
 
+/// GET /ns — list all namespaces.
+async fn list_namespaces(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    let namespaces = state.index.list_namespaces().await?;
+    Ok(Json(NamespacesResponse { namespaces }))
+}
+
+/// POST /ns/{ns} — materialize an empty namespace (idempotent).
+async fn create_namespace(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
+    // `namespace` creates the LanceDB table if it doesn't exist.
+    state.index.namespace(&ns).await?;
+    Ok(Json(json!({"status": "created", "namespace": ns})))
+}
+
+/// DELETE /ns/{ns}/docs — delete rows by id. Used by the grep CLI to
+/// prune chunks belonging to files that were removed from disk.
+async fn delete_docs(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Json(req): Json<DeleteDocsRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
+    if req.ids.is_empty() {
+        return Ok(Json(json!({"deleted": 0, "namespace": ns})));
+    }
+    if req.ids.len() > MAX_ROWS_PER_UPSERT {
+        return Err(AppError::bad_request(&format!(
+            "too many ids ({}, max {MAX_ROWS_PER_UPSERT})",
+            req.ids.len()
+        )));
+    }
+    let table = state.index.get_namespace(&ns).await?;
+    let n = table.delete_by_ids(&req.ids).await?;
+    // Anything cached for this namespace could reference a just-deleted
+    // row; nuke the namespace cache so the next query rebuilds.
+    state.cache.invalidate(&ns);
+    // Deletes leave the ANN + FTS indexes pointing at ghost rows. Tell
+    // the auto-indexer so it schedules a rebuild once the delete burst
+    // settles; passing the post-delete count keeps the pending marker
+    // in sync with the on-disk row count.
+    if n > 0 {
+        let post_count = table.count().await.unwrap_or(0);
+        state.auto_index.notify_upsert(&ns, post_count).await;
+    }
+    Ok(Json(json!({"deleted": n, "namespace": ns})))
+}
+
 /// DELETE /ns/{ns} — drop a namespace.
 async fn drop_namespace(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     validate_namespace(&ns).map_err(|e| AppError::bad_request(&e))?;
+    // Abort the auto-index worker first so it stops holding a live
+    // `NamespaceTable` and issuing writes before we drop the table.
+    state.auto_index.drop_namespace(&ns).await;
     state.index.drop_namespace(&ns).await?;
     state.cache.remove_namespace(&ns);
 
@@ -345,17 +420,24 @@ mod tests {
             index: Default::default(),
         };
 
-        let index = IndexManager::connect(&storage).await.unwrap();
+        let index = Arc::new(IndexManager::connect(&storage).await.unwrap());
         let cache = Arc::new(SearchCache::new(&config.cache).await.unwrap());
         let search = Arc::new(SearchEngine::new(cache.clone(), config.index.clone()));
         let encoder = Arc::from(build_encoder(&config.encoder));
+        let auto_index = crate::auto_index::AutoIndexer::new(
+            config.index.clone(),
+            &config.storage,
+            Arc::clone(&index),
+            Arc::clone(&cache),
+        );
         let state = AppState {
             config,
-            index: Arc::new(index),
+            index,
             cache,
             search,
             encoder,
             jobs: Arc::new(IndexJobRegistry::new()),
+            auto_index,
         };
 
         (router(state), dir)

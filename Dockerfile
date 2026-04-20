@@ -19,6 +19,6 @@ COPY config.toml /app/config.toml
 
 ENV PLUME_CONFIG=/app/config.toml
 
-EXPOSE 3000
+EXPOSE 8787
 
 CMD ["plume"]

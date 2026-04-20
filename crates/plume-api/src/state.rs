@@ -1,3 +1,4 @@
+use crate::auto_index::AutoIndexer;
 use crate::jobs::IndexJobRegistry;
 
 use std::sync::Arc;
@@ -17,4 +18,5 @@ pub struct AppState {
     pub search: Arc<SearchEngine>,
     pub encoder: Arc<dyn Encode>,
     pub jobs: Arc<IndexJobRegistry>,
+    pub auto_index: AutoIndexer,
 }

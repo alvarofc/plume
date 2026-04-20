@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlumeConfig {
     #[serde(default)]
     pub server: ServerConfig,
@@ -109,6 +109,8 @@ pub struct IndexConfig {
     /// large `ann_candidate_multiplier` could OOM the process.
     #[serde(default = "default_max_candidates")]
     pub max_candidates: usize,
+    #[serde(default)]
+    pub auto: AutoIndexConfig,
 }
 
 impl Default for IndexConfig {
@@ -120,6 +122,37 @@ impl Default for IndexConfig {
             refine_factor: None,
             ann_candidate_multiplier: default_ann_candidate_multiplier(),
             max_candidates: default_max_candidates(),
+            auto: AutoIndexConfig::default(),
+        }
+    }
+}
+
+/// Background auto-indexing. When enabled, each upsert schedules an
+/// ANN + FTS rebuild that fires once either the document threshold is
+/// hit or writes have been quiet for `debounce_ms`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoIndexConfig {
+    #[serde(default = "default_auto_index_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_auto_index_threshold_docs")]
+    pub threshold_docs: usize,
+    #[serde(default = "default_auto_index_debounce_ms")]
+    pub debounce_ms: u64,
+    /// Minimum row count in the namespace before the first ANN build
+    /// runs. IVF_PQ training needs a sample that's large relative to
+    /// `num_partitions`; below this we skip the ANN build and queries
+    /// continue to use the bounded-scan fallback.
+    #[serde(default = "default_auto_index_min_docs")]
+    pub min_docs: usize,
+}
+
+impl Default for AutoIndexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_auto_index_enabled(),
+            threshold_docs: default_auto_index_threshold_docs(),
+            debounce_ms: default_auto_index_debounce_ms(),
+            min_docs: default_auto_index_min_docs(),
         }
     }
 }
@@ -133,22 +166,22 @@ impl PlumeConfig {
     }
 
     pub fn from_env_or_default() -> Result<Self, crate::error::PlumeError> {
-        match std::env::var("PLUME_CONFIG") {
-            Ok(path) => Self::from_file(&path),
-            Err(_) => Ok(Self::default()),
+        let mut config = match std::env::var("PLUME_CONFIG") {
+            Ok(path) => Self::from_file(&path)?,
+            Err(_) => Self::default(),
+        };
+        // PLUME_BIND_HOST / PLUME_BIND_PORT override whatever the config
+        // file says. `plume grep` uses these to force the daemon it
+        // auto-spawns to bind the same host:port the CLI is polling.
+        if let Ok(host) = std::env::var("PLUME_BIND_HOST") {
+            config.server.host = host;
         }
-    }
-}
-
-impl Default for PlumeConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            storage: StorageConfig::default(),
-            cache: CacheConfig::default(),
-            encoder: EncoderConfig::default(),
-            index: IndexConfig::default(),
+        if let Ok(port) = std::env::var("PLUME_BIND_PORT") {
+            config.server.port = port.parse().map_err(|e| {
+                crate::error::PlumeError::Config(format!("invalid PLUME_BIND_PORT: {e}"))
+            })?;
         }
+        Ok(config)
     }
 }
 
@@ -156,7 +189,22 @@ fn default_host() -> String {
     "0.0.0.0".into()
 }
 fn default_port() -> u16 {
-    3000
+    8787
+}
+fn default_auto_index_enabled() -> bool {
+    true
+}
+fn default_auto_index_threshold_docs() -> usize {
+    1000
+}
+fn default_auto_index_debounce_ms() -> u64 {
+    5000
+}
+fn default_auto_index_min_docs() -> usize {
+    // IVF_PQ needs a reasonable training sample. With the workspace default
+    // of 128 partitions and ~40 tokens/doc, 256 documents give LanceDB
+    // enough token vectors to train without complaint.
+    256
 }
 fn default_storage_uri() -> String {
     "./data/lancedb".into()

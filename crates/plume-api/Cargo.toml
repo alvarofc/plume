@@ -6,8 +6,11 @@ edition.workspace = true
 [features]
 default = []
 # Propagate cloud backend support to the API binary only when explicitly requested.
-storage-aws = ["plume-index/storage-aws"]
-storage-gcs = ["plume-index/storage-gcs"]
+# `storage-aws` / `storage-gcs` flip on both the LanceDB object-store backend
+# *and* the matching `object_store` provider in the CLI, so `plume ingest` and
+# `plume grep` can read directly from s3:// / gs:// URLs.
+storage-aws = ["plume-index/storage-aws", "object_store/aws"]
+storage-gcs = ["plume-index/storage-gcs", "object_store/gcp"]
 
 [[bin]]
 name = "plume"
@@ -29,6 +32,16 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+walkdir = { workspace = true }
+globset = { workspace = true }
+regex = { workspace = true }
+object_store = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+url = "2"
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

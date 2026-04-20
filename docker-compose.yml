@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     ports:
-      - "3000:3000"
+      - "8787:8787"
     environment:
       - PLUME_CONFIG=/app/config.toml
       - AWS_ENDPOINT=http://minio:9000

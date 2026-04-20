@@ -9,6 +9,15 @@ Rust workspace split into: `plume-core` (types/config), `plume-encoder` (ONNX or
 
 Semantic-search flow: encode query into a multi-vector → ANN candidate retrieval on LanceDB → exact ColBERT MaxSim rerank in `plume-search` → cache result. FTS (BM25) and hybrid (RRF over semantic + FTS) are also supported.
 
+## Ingest / grep source abstraction
+
+`crates/plume-api/src/cli/source.rs` is the single place that knows how to read a corpus. It resolves either a local path or an `s3://bucket/prefix` / `gs://bucket/prefix` URL via [`Source::parse`], exposes `list()` and `read_text()`, and is consumed by both `plume ingest` and `plume grep`.
+
+Two things to keep in mind when editing:
+
+- **Feature gating.** Remote sources are behind `storage-aws` / `storage-gcs`, which activate `object_store/{aws,gcp}` in addition to the LanceDB backends. A default build with `s3://...` fails fast at parse time with a build hint — do not fall through to "local path not found".
+- **Identity, not file path.** Manifests (for `plume grep`) and namespace names (`grep-{hash}`) are keyed off `Source::identity()`, not `&Path`. Local paths still hash their filesystem bytes (via `namespace_for_path`) for backward compatibility; remote sources hash the URL. When adding new source types, preserve that split so existing `.json` manifests aren't orphaned.
+
 ## LanceDB multi-vector
 
 Verified against `lancedb-0.27.2` source; use this as the source of truth for this repo.
@@ -39,7 +48,7 @@ The native path is triggered inside `lancedb::table::query::create_plan` (`src/t
 
 ### Parameter tuning (late-interaction)
 
-Start from LanceDB's own GIST-1M numbers (>0.95 recall at ~10ms): `nprobes ~ 50`, `refine_factor ~ 50`. For our SciFact corpus (5,183 docs, ~40 tokens/doc → ~200K token vectors) more probes and a larger `refine_factor` matter more than smaller ones. Defaults in `config.toml` (`nprobes=16`, `refine_factor=None`) are tuned for latency, not recall.
+LanceDB's GIST-1M docs suggest `nprobes ~ 50`, `refine_factor ~ 50` as starting points. Our actual bench-recall sweep on BEIR SciFact landed on a different spot: with the wider client-side MaxSim rerank pool in `plume-search`, raising `nprobes` past 20 or enabling `refine_factor` at all did not improve e2e recall and cost >10× latency. Current `config.toml` defaults (`nprobes=20`, `refine_factor=None`, `ann_candidate_multiplier=50`) hit ~0.719 e2e recall at ~138ms — essentially matching the exact-MaxSim ceiling of 0.720. Before raising these "because LanceDB said so", rerun `bench-recall` on the target corpus and compare e2e recall, not ANN-vs-exact approximation recall.
 
 Known trade-off: on small corpora, pooled single-vector ANN + client-side MaxSim rerank (what we used pre-native-multivector) can beat the native multi-vector IVF_PQ index on both recall and latency. LanceDB's own ColPali tutorial uses pooled+padded retrieval plus client-side MaxSim rather than the native index for the same reason. Before committing to one or the other, run `bench-recall` with both paths on the target corpus size.
 
