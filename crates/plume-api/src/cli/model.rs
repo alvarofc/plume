@@ -226,6 +226,20 @@ async fn download_file(http: &reqwest::Client, repo: &str, file: &str, dest: &Pa
     drop(out);
     bar.finish_and_clear();
 
+    // Windows' `rename` is not atomic-replace: it fails if `dest` exists.
+    // A partial-download recovery run (model.onnx present but zero bytes)
+    // would trip that path, so pre-remove any stale dest before renaming.
+    // On Unix the `rename` below is already atomic-replace; the extra
+    // remove is a no-op when the file isn't there.
+    if tokio::fs::try_exists(dest)
+        .await
+        .with_context(|| format!("check {}", dest.display()))?
+    {
+        tokio::fs::remove_file(dest)
+            .await
+            .with_context(|| format!("remove stale {}", dest.display()))?;
+    }
+
     tokio::fs::rename(&tmp, dest)
         .await
         .with_context(|| format!("rename {} → {}", tmp.display(), dest.display()))?;

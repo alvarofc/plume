@@ -163,14 +163,12 @@ pub async fn run(args: Args) -> Result<()> {
     let mut uploaded_files = 0usize;
     for file in &files {
         bar.set_message(file.key.clone());
-        let bytes = tokio::fs::read(args.source.join(&file.key))
-            .await
-            .with_context(|| format!("read {}", file.key))?;
-        let size = bytes.len() as u64;
-        dest.write_bytes(&file.key, bytes::Bytes::from(bytes))
+        // Stream the file straight into the destination rather than
+        // materializing it in RAM — multi-GiB artifacts would otherwise OOM.
+        dest.write_file(&file.key, &args.source.join(&file.key))
             .await
             .with_context(|| format!("write {}", file.key))?;
-        bar.inc(size);
+        bar.inc(file.size);
         uploaded_files += 1;
     }
     bar.finish_and_clear();

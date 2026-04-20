@@ -141,24 +141,35 @@ impl Source {
         }
     }
 
-    /// Write raw bytes under `key`. Local sources create missing parent
-    /// directories; remote sources PUT at `{prefix}/{key}`. Used by
-    /// `plume push` to upload a local tree into an object-store prefix.
-    pub async fn write_bytes(&self, key: &str, bytes: bytes::Bytes) -> Result<()> {
+    /// Stream a local file into the destination under `key` without
+    /// materializing it in RAM. `plume push` uses this so multi-GiB
+    /// artifacts don't OOM the host. Only valid on directory-rooted
+    /// sources — a single-file `Source::Local` would produce nonsense
+    /// paths via `root.join(key)` and is rejected.
+    pub async fn write_file(&self, key: &str, src: &Path) -> Result<()> {
         match self {
             Self::Local { root } => {
+                if root.is_file() {
+                    bail!(
+                        "cannot write into {} — destination must be a directory, not a single file",
+                        root.display()
+                    );
+                }
                 let path = root.join(key);
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
                         .await
                         .with_context(|| format!("create parent dir for {}", path.display()))?;
                 }
-                tokio::fs::write(&path, &bytes)
+                // `tokio::fs::copy` delegates to `std::fs::copy` on a
+                // blocking thread — platform-native, streams under the
+                // hood, no user-space buffer.
+                tokio::fs::copy(src, &path)
                     .await
-                    .with_context(|| format!("write {}", path.display()))?;
+                    .with_context(|| format!("copy {} → {}", src.display(), path.display()))?;
                 Ok(())
             }
-            Self::Remote(r) => r.write_bytes(key, bytes).await,
+            Self::Remote(r) => r.write_file(key, src).await,
         }
     }
 }
@@ -517,21 +528,37 @@ impl RemoteSource {
         Ok(decode_text(&bytes))
     }
 
-    async fn write_bytes(&self, key: &str, bytes: bytes::Bytes) -> Result<()> {
-        use object_store::path::Path as OsPath;
+    async fn write_file(&self, key: &str, src: &Path) -> Result<()> {
+        use object_store::buffered::BufWriter;
+        use tokio::io::AsyncWriteExt;
 
+        let path = self.object_path(key);
+        let mut file = tokio::fs::File::open(src)
+            .await
+            .with_context(|| format!("open {}", src.display()))?;
+        // `BufWriter` transparently uses multipart for large objects and
+        // regular PUT for small ones — no user-space buffering of the
+        // whole file.
+        let mut writer = BufWriter::new(self.store.clone(), path);
+        tokio::io::copy(&mut file, &mut writer)
+            .await
+            .with_context(|| format!("stream {key}"))?;
+        writer
+            .shutdown()
+            .await
+            .with_context(|| format!("finalize upload of {key}"))?;
+        Ok(())
+    }
+
+    fn object_path(&self, key: &str) -> object_store::path::Path {
+        use object_store::path::Path as OsPath;
         let trimmed = self.prefix.trim_matches('/');
         let full = if trimmed.is_empty() {
             key.trim_start_matches('/').to_string()
         } else {
             format!("{trimmed}/{}", key.trim_start_matches('/'))
         };
-        let path = OsPath::from(full);
-        self.store
-            .put(&path, bytes.into())
-            .await
-            .with_context(|| format!("put {key}"))?;
-        Ok(())
+        OsPath::from(full)
     }
 }
 
