@@ -310,6 +310,14 @@ async fn delete_docs(
     // Anything cached for this namespace could reference a just-deleted
     // row; nuke the namespace cache so the next query rebuilds.
     state.cache.invalidate(&ns);
+    // Deletes leave the ANN + FTS indexes pointing at ghost rows. Tell
+    // the auto-indexer so it schedules a rebuild once the delete burst
+    // settles; passing the post-delete count keeps the pending marker
+    // in sync with the on-disk row count.
+    if n > 0 {
+        let post_count = table.count().await.unwrap_or(0);
+        state.auto_index.notify_upsert(&ns, post_count).await;
+    }
     Ok(Json(json!({"deleted": n, "namespace": ns})))
 }
 

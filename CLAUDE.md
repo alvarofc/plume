@@ -48,7 +48,7 @@ The native path is triggered inside `lancedb::table::query::create_plan` (`src/t
 
 ### Parameter tuning (late-interaction)
 
-Start from LanceDB's own GIST-1M numbers (>0.95 recall at ~10ms): `nprobes ~ 50`, `refine_factor ~ 50`. For our SciFact corpus (5,183 docs, ~40 tokens/doc → ~200K token vectors) more probes and a larger `refine_factor` matter more than smaller ones. Defaults in `config.toml` (`nprobes=16`, `refine_factor=None`) are tuned for latency, not recall.
+LanceDB's GIST-1M docs suggest `nprobes ~ 50`, `refine_factor ~ 50` as starting points. Our actual bench-recall sweep on BEIR SciFact landed on a different spot: with the wider client-side MaxSim rerank pool in `plume-search`, raising `nprobes` past 20 or enabling `refine_factor` at all did not improve e2e recall and cost >10× latency. Current `config.toml` defaults (`nprobes=20`, `refine_factor=None`, `ann_candidate_multiplier=50`) hit ~0.719 e2e recall at ~138ms — essentially matching the exact-MaxSim ceiling of 0.720. Before raising these "because LanceDB said so", rerun `bench-recall` on the target corpus and compare e2e recall, not ANN-vs-exact approximation recall.
 
 Known trade-off: on small corpora, pooled single-vector ANN + client-side MaxSim rerank (what we used pre-native-multivector) can beat the native multi-vector IVF_PQ index on both recall and latency. LanceDB's own ColPali tutorial uses pooled+padded retrieval plus client-side MaxSim rather than the native index for the same reason. Before committing to one or the other, run `bench-recall` with both paths on the target corpus size.
 

@@ -142,8 +142,9 @@ plume index code --fts-only
 
 `plume ingest <dir>` walks the directory, picks up every file matching
 `--extensions` (default `md,markdown,txt,rst,org`), and uses the relative
-path (without the extension) as the document id, so re-running overwrites
-existing documents in place. `s3://bucket/prefix` and `gs://bucket/prefix`
+path (including the extension) as the document id, so re-running overwrites
+existing documents in place and sibling files like `guide.md` and
+`guide.txt` stay distinct. `s3://bucket/prefix` and `gs://bucket/prefix`
 URLs behave identically, with the object key (relative to the prefix)
 acting as the document id. Credentials follow the standard AWS / GCS
 resolver chain; see `plume ingest --help` for the full flag list.

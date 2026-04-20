@@ -192,9 +192,13 @@ impl AutoIndexer {
         };
         if let Err(e) = write_marker(state_dir, namespace, docs) {
             warn!(%namespace, error = %e, "auto-index: manual-build marker write failed");
-            return;
         }
-        clear_pending_marker(state_dir, namespace);
+        // Deliberately do *not* clear the pending marker here. A write
+        // that arrived during the manual build bumped the pending flag
+        // but has no in-memory scheduler to drive it (manual builds
+        // bypass `notify_upsert`). Clearing it would lose the restart
+        // recovery signal. Worst case: one spurious rebuild on the next
+        // startup if no writes raced the manual build — cheap.
     }
 
     /// Record an upsert. Spawns the namespace scheduler on first use or
@@ -209,8 +213,12 @@ impl AutoIndexer {
         // restart, `recover()` sees the flag and re-queues even when the
         // count marker already matches `current`. Best-effort — a
         // transient fs error is logged and otherwise ignored.
+        //
+        // Uses tokio::fs so the fs touch doesn't block the reactor on
+        // slow disks; upsert is a hot path.
         if let Some(ref state_dir) = self.inner.state_dir {
-            if let Err(e) = touch_pending_marker(state_dir, namespace) {
+            let path = pending_marker_path(state_dir, namespace);
+            if let Err(e) = tokio::fs::write(&path, b"").await {
                 debug!(
                     %namespace,
                     error = %e,
@@ -263,6 +271,10 @@ impl AutoIndexer {
         let entry = self.inner.states.lock().await.remove(namespace);
         if let Some(entry) = entry {
             entry.handle.abort();
+            // Await the handle so a build in-flight finishes winding
+            // down before we delete the table under it. Ignore JoinError
+            // — abort produces a cancelled() error which is expected.
+            let _ = entry.handle.await;
         }
         if let Some(ref dir) = self.inner.state_dir {
             let path = marker_path(dir, namespace);
@@ -323,10 +335,10 @@ fn has_pending_marker(state_dir: &Path, ns: &str) -> bool {
 }
 
 /// Flags the namespace as having unindexed writes. Idempotent: we don't
-/// care about the contents, only the presence of the file. `notify_upsert`
-/// touches this before bumping in-memory counters so a crash between
-/// accepting the write and finishing the debounced build is still
-/// noticed on restart.
+/// care about the contents, only the presence of the file. Only used by
+/// tests now — `notify_upsert` writes the pending marker inline via
+/// `tokio::fs` so upserts don't block the reactor on the filesystem.
+#[cfg(test)]
 fn touch_pending_marker(state_dir: &Path, ns: &str) -> io::Result<()> {
     std::fs::write(pending_marker_path(state_dir, ns), b"")
 }

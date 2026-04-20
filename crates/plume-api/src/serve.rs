@@ -1,8 +1,8 @@
 //! HTTP server entry point for `plume serve`.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Context;
 use plume_cache::SearchCache;
 use plume_core::config::PlumeConfig;
 use plume_encoder::build_encoder;
@@ -53,13 +53,20 @@ pub async fn run() -> anyhow::Result<()> {
 
     let app = routes::router(state);
 
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
-        .parse()
-        .expect("invalid server address");
-
+    // Go through the tuple form so DNS hostnames and bracketed IPv6
+    // literals work the same as bare IPs. `SocketAddr::parse` only
+    // accepts raw numeric addresses, which means `host = "localhost"`
+    // or `host = "[::1]"` from config would blow up at startup.
+    let bare_host = config
+        .server
+        .host
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let listener = tokio::net::TcpListener::bind((bare_host, config.server.port))
+        .await
+        .with_context(|| format!("bind {}:{}", config.server.host, config.server.port))?;
+    let addr = listener.local_addr().context("read listener local addr")?;
     info!(%addr, "listening");
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())

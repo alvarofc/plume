@@ -413,12 +413,23 @@ impl RemoteSource {
         use futures::StreamExt;
         use object_store::path::Path as OsPath;
 
+        // Treat the prefix like a directory regardless of whether the
+        // user wrote `s3://bucket/notes` or `s3://bucket/notes/`. The
+        // explicit trailing `/` is what stops a prefix of `notes` from
+        // quietly matching `notes_dev/foo.md` on backends that do raw
+        // string-prefix matching.
+        let trimmed = self.prefix.trim_matches('/');
         let prefix_owned;
-        let prefix = if self.prefix.is_empty() {
+        let prefix = if trimmed.is_empty() {
             None
         } else {
-            prefix_owned = OsPath::from(self.prefix.clone());
+            prefix_owned = OsPath::from(trimmed.to_string());
             Some(&prefix_owned)
+        };
+        let match_prefix = if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("{trimmed}/")
         };
 
         let mut stream = self.store.list(prefix);
@@ -426,15 +437,16 @@ impl RemoteSource {
         while let Some(meta) = stream.next().await {
             let meta = meta.context("list objects")?;
             let abs_key = meta.location.as_ref().to_string();
-            // Relative to the configured prefix so keys survive as doc ids.
-            let rel_key = if self.prefix.is_empty() {
+            // Require the key to live under `{prefix}/` so `notes`
+            // never sees `notes_dev/...`. Also serves as the id root
+            // for downstream upserts.
+            let rel_key = if match_prefix.is_empty() {
                 abs_key.clone()
             } else {
-                abs_key
-                    .strip_prefix(&self.prefix)
-                    .unwrap_or(&abs_key)
-                    .trim_start_matches('/')
-                    .to_string()
+                match abs_key.strip_prefix(&match_prefix) {
+                    Some(r) => r.to_string(),
+                    None => continue,
+                }
             };
             if rel_key.is_empty() {
                 continue;
@@ -465,10 +477,11 @@ impl RemoteSource {
     async fn read_text(&self, key: &str) -> Result<Option<String>> {
         use object_store::path::Path as OsPath;
 
-        let full = if self.prefix.is_empty() {
-            key.to_string()
+        let trimmed = self.prefix.trim_matches('/');
+        let full = if trimmed.is_empty() {
+            key.trim_start_matches('/').to_string()
         } else {
-            format!("{}/{}", self.prefix.trim_end_matches('/'), key)
+            format!("{trimmed}/{}", key.trim_start_matches('/'))
         };
         let path = OsPath::from(full);
         let bytes = self

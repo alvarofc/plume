@@ -1,11 +1,21 @@
 //! Thin HTTP client shared across CLI subcommands.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 pub const DEFAULT_URL: &str = "http://localhost:8787";
+
+/// Fail fast when the server is down. 5s is generous for localhost and
+/// still quick enough that a typo'd host doesn't hang the CLI.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Cap for any single request. Ingest batches and index builds can be
+/// slow, but 5 minutes is the outer bound before we'd rather error out
+/// than wait silently.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct Client {
     base_url: String,
@@ -19,6 +29,8 @@ impl Client {
             base_url,
             http: reqwest::Client::builder()
                 .user_agent(concat!("plume-cli/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
                 .build()
                 .expect("reqwest client"),
         }

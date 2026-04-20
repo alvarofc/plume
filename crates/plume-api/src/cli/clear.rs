@@ -43,7 +43,11 @@ pub async fn run(args: Args) -> Result<()> {
             .lock()
             .read_line(&mut line)
             .context("read confirmation from stdin")?;
-        if !matches!(line.trim(), "y" | "yes" | "Y" | "YES") {
+        // Lowercase once so mixed-case variants like "Yes" / "yEs" are
+        // treated the same as "y" / "yes" — avoids the surprise of
+        // dropping through to "aborted" on a non-canonical confirmation.
+        let normalized = line.trim().to_ascii_lowercase();
+        if !matches!(normalized.as_str(), "y" | "yes") {
             eprintln!("plume: aborted");
             return Ok(());
         }

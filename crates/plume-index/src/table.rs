@@ -296,6 +296,12 @@ impl NamespaceTable {
                 .await
                 .map_err(|e| PlumeError::Index(format!("delete failed: {e}")))?;
         }
+        // If this delete emptied the table, the `has_rows` flag must flip
+        // back to `false` so the next upsert takes the `add` path instead
+        // of `merge_insert` — the latter panics on an empty table.
+        let has_data = table_has_rows(&table).await?;
+        self.has_rows
+            .store(has_data, std::sync::atomic::Ordering::Relaxed);
         Ok(ids.len())
     }
 }

@@ -185,12 +185,25 @@ async fn flush(
 
 type DocIter = Box<dyn Iterator<Item = Result<Document>>>;
 
+/// Local-only fast path for `.jsonl` files. `s3://...corpus.jsonl` and
+/// `gs://...corpus.jsonl` are treated as remote sources instead — the
+/// remote source lists and fetches objects even when the extension
+/// happens to be `.jsonl`. That keeps bucket-of-jsonl workloads working
+/// without silently dropping back to a file-not-found error.
 fn is_jsonl_path(input: &str) -> bool {
+    if is_remote_url(input) {
+        return false;
+    }
     Path::new(input)
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("jsonl"))
         .unwrap_or(false)
+}
+
+fn is_remote_url(input: &str) -> bool {
+    let lower = input.to_ascii_lowercase();
+    lower.starts_with("s3://") || lower.starts_with("gs://")
 }
 
 fn jsonl_iter(path: &Path) -> Result<DocIter> {
@@ -245,6 +258,11 @@ mod tests {
         assert!(is_jsonl_path("/abs/path.JSONL"));
         assert!(!is_jsonl_path("foo.md"));
         assert!(!is_jsonl_path("s3://bucket/data"));
+        // Remote URLs go through Source even when the extension is
+        // `.jsonl`, so `s3://bucket/corpus.jsonl` doesn't hit the
+        // local-file JSONL path.
+        assert!(!is_jsonl_path("s3://bucket/corpus.jsonl"));
+        assert!(!is_jsonl_path("gs://bucket/corpus.JSONL"));
     }
 
     #[test]

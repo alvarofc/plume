@@ -1318,7 +1318,9 @@ mod tests {
         assert_eq!(b.port, 8787);
 
         let b = parse_bind_target("http://[::1]:8080").unwrap();
-        // url::Url::host_str strips brackets for IPv6 literals.
+        // `url::Url::host_str` preserves the brackets for IPv6 literals
+        // (they round-trip as part of the URL authority). Downstream
+        // `is_local` handles both `[::1]` and bare `::1`.
         assert_eq!(b.host, "[::1]");
         assert_eq!(b.port, 8080);
         assert!(b.is_local());
