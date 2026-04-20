@@ -20,6 +20,7 @@ use clap::Parser;
 use plume_core::types::{Document, UpsertRequest, UpsertResponse, MAX_ROWS_PER_UPSERT};
 
 use super::client::{Client, DEFAULT_URL};
+use super::progress::new_steps;
 use super::source::{Filter, Source};
 
 /// Text-file extensions the directory / object-store walker will pick up.
@@ -102,32 +103,33 @@ pub async fn run(args: Args) -> Result<()> {
     let mut batch: Vec<Document> = Vec::with_capacity(args.batch_size);
     let mut uploaded = 0usize;
 
+    let bar = new_steps(files.len() as u64, "ingesting");
     for file in files {
+        bar.set_message(file.key.clone());
         let text = match source
             .read_text(&file.key)
             .await
             .with_context(|| format!("read {}", file.key))?
         {
             Some(t) => t,
-            None => continue,
+            None => {
+                bar.inc(1);
+                continue;
+            }
         };
         let id = id_from_key(&file.key);
         let mut metadata: HashMap<String, serde_json::Value> = HashMap::new();
         metadata.insert("path".into(), serde_json::Value::String(file.key.clone()));
-        batch.push(Document {
-            id,
-            text,
-            metadata,
-        });
+        batch.push(Document { id, text, metadata });
+        bar.inc(1);
         if batch.len() >= args.batch_size {
             uploaded += flush(&client, ns, &mut batch, args.batch_size).await?;
-            eprintln!("plume: upserted {uploaded} docs into {ns}");
         }
     }
     if !batch.is_empty() {
         uploaded += flush(&client, ns, &mut batch, args.batch_size).await?;
-        eprintln!("plume: upserted {uploaded} docs into {ns}");
     }
+    bar.finish_and_clear();
 
     if uploaded == 0 {
         bail!("no documents ingested from {}", source.display());
@@ -147,17 +149,21 @@ async fn ingest_jsonl(args: &Args) -> Result<()> {
     let mut batch: Vec<Document> = Vec::with_capacity(args.batch_size);
     let mut uploaded = 0usize;
 
+    // JSONL line count is unknown up-front — use a spinner that reports
+    // running totals. Counting lines first would double-read the file.
+    let bar = super::progress::new_spinner("ingesting");
     for doc in iter {
         batch.push(doc?);
         if batch.len() >= args.batch_size {
             uploaded += flush(&client, ns, &mut batch, args.batch_size).await?;
-            eprintln!("plume: upserted {uploaded} docs into {ns}");
+            bar.set_message(format!("{uploaded} docs"));
         }
     }
     if !batch.is_empty() {
         uploaded += flush(&client, ns, &mut batch, args.batch_size).await?;
-        eprintln!("plume: upserted {uploaded} docs into {ns}");
+        bar.set_message(format!("{uploaded} docs"));
     }
+    bar.finish_and_clear();
 
     if uploaded == 0 {
         bail!("no documents found at {}", args.path);

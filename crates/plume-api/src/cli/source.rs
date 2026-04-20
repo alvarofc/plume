@@ -130,13 +130,35 @@ impl Source {
                     Ok(b) => b,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                     Err(e) => {
-                        return Err(anyhow::Error::from(e)
-                            .context(format!("read {}", path.display())))
+                        return Err(
+                            anyhow::Error::from(e).context(format!("read {}", path.display()))
+                        )
                     }
                 };
                 Ok(decode_text(&bytes))
             }
             Self::Remote(r) => r.read_text(key).await,
+        }
+    }
+
+    /// Write raw bytes under `key`. Local sources create missing parent
+    /// directories; remote sources PUT at `{prefix}/{key}`. Used by
+    /// `plume push` to upload a local tree into an object-store prefix.
+    pub async fn write_bytes(&self, key: &str, bytes: bytes::Bytes) -> Result<()> {
+        match self {
+            Self::Local { root } => {
+                let path = root.join(key);
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .with_context(|| format!("create parent dir for {}", path.display()))?;
+                }
+                tokio::fs::write(&path, &bytes)
+                    .await
+                    .with_context(|| format!("write {}", path.display()))?;
+                Ok(())
+            }
+            Self::Remote(r) => r.write_bytes(key, bytes).await,
         }
     }
 }
@@ -494,6 +516,23 @@ impl RemoteSource {
             .with_context(|| format!("read body {key}"))?;
         Ok(decode_text(&bytes))
     }
+
+    async fn write_bytes(&self, key: &str, bytes: bytes::Bytes) -> Result<()> {
+        use object_store::path::Path as OsPath;
+
+        let trimmed = self.prefix.trim_matches('/');
+        let full = if trimmed.is_empty() {
+            key.trim_start_matches('/').to_string()
+        } else {
+            format!("{trimmed}/{}", key.trim_start_matches('/'))
+        };
+        let path = OsPath::from(full);
+        self.store
+            .put(&path, bytes.into())
+            .await
+            .with_context(|| format!("put {key}"))?;
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "storage-aws", feature = "storage-gcs"))]
@@ -670,14 +709,20 @@ mod tests {
             .await
             .unwrap();
         store
-            .put(&OsPath::from("other/c.md"), b"outside prefix".to_vec().into())
+            .put(
+                &OsPath::from("other/c.md"),
+                b"outside prefix".to_vec().into(),
+            )
             .await
             .unwrap();
 
         let remote = RemoteSource::new_in_memory("bucket", "docs", store);
         let source = Source::Remote(remote);
 
-        let files = source.list(&Filter::with_exts(["md", "txt"])).await.unwrap();
+        let files = source
+            .list(&Filter::with_exts(["md", "txt"]))
+            .await
+            .unwrap();
         let mut keys: Vec<String> = files.into_iter().map(|f| f.key).collect();
         keys.sort();
         assert_eq!(keys, vec!["a.md", "nested/b.txt"]);

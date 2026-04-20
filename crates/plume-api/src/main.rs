@@ -30,6 +30,8 @@ enum Command {
     Grep(cli::grep::Args),
     /// Ingest documents from a JSONL file or a directory of .md files.
     Ingest(cli::ingest::Args),
+    /// Upload a local directory to S3/GCS (or another local path).
+    Push(cli::push::Args),
     /// Run a query and print results.
     Search(cli::search::Args),
     /// Manage namespaces.
@@ -40,13 +42,15 @@ enum Command {
     Status(cli::status::Args),
     /// Drop the per-path grep index (namespace + manifest).
     Clear(cli::clear::Args),
+    /// Download and manage encoder models (HuggingFace ONNX).
+    Model(cli::model::Args),
 }
 
 /// Subcommand names we recognize. Anything else in argv[1] falls through
 /// to implicit `grep`, so `plume "auth token" src/` works without typing
 /// `grep`.
 const KNOWN_SUBCOMMANDS: &[&str] = &[
-    "serve", "grep", "ingest", "search", "ns", "index", "status", "clear", "help",
+    "serve", "grep", "ingest", "push", "search", "ns", "index", "status", "clear", "model", "help",
 ];
 
 /// argv[1] values clap handles natively; don't rewrite these into `grep`.
@@ -80,11 +84,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => serve::run().await,
         Command::Grep(args) => cli::grep::run(args).await,
         Command::Ingest(args) => cli::ingest::run(args).await,
+        Command::Push(args) => cli::push::run(args).await,
         Command::Search(args) => cli::search::run(args).await,
         Command::Ns(args) => cli::ns::run(args).await,
         Command::Index(args) => cli::index::run(args).await,
         Command::Status(args) => cli::status::run(args).await,
         Command::Clear(args) => cli::clear::run(args).await,
+        Command::Model(args) => cli::model::run(args).await,
     }
 }
 

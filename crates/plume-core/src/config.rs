@@ -181,6 +181,9 @@ impl PlumeConfig {
                 crate::error::PlumeError::Config(format!("invalid PLUME_BIND_PORT: {e}"))
             })?;
         }
+        if let Ok(model) = std::env::var("PLUME_ENCODER_MODEL") {
+            config.encoder.model = model;
+        }
         Ok(config)
     }
 }

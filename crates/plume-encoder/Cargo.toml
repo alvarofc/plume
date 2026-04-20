@@ -4,8 +4,37 @@ version.workspace = true
 edition.workspace = true
 
 [features]
+# The ONNX encoder is the production path — disable only for constrained
+# builds that want the mock encoder (`--no-default-features`).
 default = []
-onnx = ["dep:ort", "dep:tokenizers"]
+# Default ONNX path: pyke prebuilt binaries downloaded at build time. Works
+# out of the box on aarch64-apple-darwin, x86_64-unknown-linux-gnu, and
+# Windows. Fails to link on x86_64-apple-darwin because pyke does not
+# publish an Intel-Mac prebuilt for rc.12.
+onnx = [
+    "dep:ort",
+    "dep:tokenizers",
+    "ort/std",
+    "ort/ndarray",
+    "ort/tracing",
+    "ort/api-24",
+    "ort/download-binaries",
+    "ort/copy-dylibs",
+    "ort/tls-rustls",
+]
+# Alternative ONNX path: link-free `dlopen()` of a system-installed
+# `libonnxruntime` at runtime via `ORT_DYLIB_PATH`. Use on Intel Macs
+# (`brew install onnxruntime`) or any host where pyke prebuilts are
+# missing / undesired. Mutually exclusive with `onnx`.
+onnx-system-ort = [
+    "dep:ort",
+    "dep:tokenizers",
+    "ort/std",
+    "ort/ndarray",
+    "ort/tracing",
+    "ort/api-24",
+    "ort/load-dynamic",
+]
 
 [dependencies]
 plume-core = { workspace = true }

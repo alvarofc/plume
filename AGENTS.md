@@ -9,12 +9,16 @@ For Claude-specific context, benchmarking notes, and late-interaction indexing f
 
 - Rust toolchain (workspace uses stable).
 - `protoc` must be on `PATH` or exported as `PROTOC`. Every `cargo` command below assumes `PROTOC=$(which protoc)`.
+  - On macOS, Homebrew's `protobuf` is keg-only: `brew install protobuf` doesn't put `protoc` on `PATH`, so `PROTOC=$(which protoc)` silently evaluates to empty and the build fails with a confusing error. Either `brew link --force protobuf` or point at it directly: `export PROTOC=/usr/local/opt/protobuf/bin/protoc` (Intel) / `/opt/homebrew/opt/protobuf/bin/protoc` (Apple Silicon).
 
 ## Common commands
 
 ```bash
-# Build the server (lean local build)
+# Build the server (default = S3 + GCS + ONNX)
 PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume
+
+# Lean local build without cloud storage or the real encoder
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --no-default-features
 
 # Run tests
 PROTOC=$(which protoc) cargo test
@@ -29,12 +33,13 @@ PLUME_CONFIG=config.local.toml ./target/release/plume
 
 ## Feature flags
 
-| Flag | Purpose |
-|------|---------|
-| default | Local filesystem LanceDB only |
-| `storage-aws` | S3 / MinIO / R2 |
-| `storage-gcs` | Google Cloud Storage |
-| `plume-encoder/onnx` | Real ColBERT ONNX encoder (else mock) |
+Defaults: `storage-aws`, `storage-gcs`, `onnx`. Drop with `--no-default-features`.
+
+| Flag | Purpose | Default |
+|------|---------|---------|
+| `storage-aws` | S3 / MinIO / R2 | on |
+| `storage-gcs` | Google Cloud Storage | on |
+| `onnx` | Real ColBERT ONNX encoder (else mock) | on |
 
 ## Benchmarks
 
@@ -50,6 +55,6 @@ PROTOC=$(which protoc) cargo run --release -p plume-bench --bin bench-recall \
 Prereqs for `bench-recall`:
 
 ```bash
-./scripts/download-model.sh models/lateon-code-edge
+plume model pull                    # or ./scripts/download-model.sh models/lateon-code-edge
 ./scripts/download-scifact.sh
 ```

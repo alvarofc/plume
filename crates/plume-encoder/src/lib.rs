@@ -1,6 +1,6 @@
 mod pool;
 
-#[cfg(feature = "onnx")]
+#[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
 mod onnx;
 
 use plume_core::error::PlumeError;
@@ -26,7 +26,7 @@ pub trait Encode: Send + Sync {
 /// `model.onnx` + `tokenizer.json`, uses the real ONNX encoder.
 /// Otherwise falls back to MockEncoder.
 pub fn build_encoder(config: &plume_core::config::EncoderConfig) -> Box<dyn Encode> {
-    #[cfg(feature = "onnx")]
+    #[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
     {
         let model_path = std::path::Path::new(&config.model);
         if model_path.join("model.onnx").exists() && model_path.join("tokenizer.json").exists() {
@@ -107,7 +107,7 @@ impl Encode for MockEncoder {
 
 // --- ONNX Encoder Encode impl ---
 
-#[cfg(feature = "onnx")]
+#[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
 impl Encode for onnx::Encoder {
     fn kind(&self) -> String {
         format!("onnx:{}", self.model_id())
