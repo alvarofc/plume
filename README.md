@@ -26,8 +26,9 @@ Storage is **LanceDB** on local disk, S3, R2, or GCS. Swap backends by changing 
 ## Quickstart
 
 ```bash
-# 1. Build (needs protoc on PATH)
-PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume
+# 1. Build with the real ColBERT encoder (needs protoc on PATH).
+#    Default features cover S3 + GCS; add `onnx` for real semantic search.
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --features onnx
 
 # 2. One-time: download the ColBERT encoder (~70MB)
 ./target/release/plume model pull
@@ -38,6 +39,8 @@ PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume
 ```
 
 That's it. First run builds the index; later runs only re-embed changed files.
+
+> Building without `--features onnx` keeps the binary portable on hosts where pyke's prebuilt ONNX Runtime isn't available, but falls back to a mock encoder — semantic quality will be poor. See [Build profiles](#build-profiles).
 
 ### Docker
 
@@ -144,15 +147,17 @@ Essentially the exact-MaxSim ceiling at ~10× less latency. The 0.72 ceiling is 
 
 ## Build profiles
 
-Default features: `storage-aws`, `storage-gcs`, `onnx`. Drop what you don't need:
+Default features: `storage-aws`, `storage-gcs`. The ONNX encoder is opt-in so a vanilla `cargo build` stays portable on hosts where pyke's prebuilt ONNX Runtime isn't published:
 
 ```bash
+# Cloud storage + real ColBERT encoder (recommended)
+cargo build --release -p plume-api --features onnx
+
 # Minimal: local-only, mock encoder
 cargo build --release -p plume-api --no-default-features
 
 # Intel Mac / anywhere pyke's ort prebuilts aren't published
-cargo build --release -p plume-api \
-  --no-default-features --features storage-aws,storage-gcs,onnx-system-ort
+cargo build --release -p plume-api --features onnx-system-ort
 brew install onnxruntime
 export ORT_DYLIB_PATH=/usr/local/opt/onnxruntime/lib/libonnxruntime.dylib
 ```

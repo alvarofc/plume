@@ -162,6 +162,9 @@ fn resolve_model(input: Option<&str>) -> Result<(String, String)> {
         // directory name so `plume model pull lightonai/Foo-Bar` lands in
         // `.../models/Foo-Bar` instead of `.../models/lightonai/Foo-Bar`.
         let local = input.rsplit('/').next().unwrap_or(input);
+        if local.is_empty() || input.split('/').any(str::is_empty) {
+            bail!("invalid HuggingFace repo id '{input}'; expected `org/name`");
+        }
         return Ok((local.to_string(), input.to_string()));
     }
     bail!(
@@ -217,13 +220,24 @@ async fn download_file(http: &reqwest::Client, repo: &str, file: &str, dest: &Pa
             .with_context(|| format!("write {}", tmp.display()))?;
         bar.inc(chunk.len() as u64);
     }
-    out.flush().await.ok();
+    out.flush()
+        .await
+        .with_context(|| format!("flush {}", tmp.display()))?;
     drop(out);
     bar.finish_and_clear();
 
     tokio::fs::rename(&tmp, dest)
         .await
         .with_context(|| format!("rename {} → {}", tmp.display(), dest.display()))?;
+    // Catch truncated downloads that somehow slipped past the streaming
+    // writer so `model_is_complete` on the next run can trust the file.
+    let len = tokio::fs::metadata(dest)
+        .await
+        .with_context(|| format!("stat {}", dest.display()))?
+        .len();
+    if len == 0 {
+        bail!("download {file} produced an empty file");
+    }
     eprintln!("  ok    {file}");
     Ok(())
 }

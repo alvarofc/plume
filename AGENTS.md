@@ -14,10 +14,12 @@ For Claude-specific context, benchmarking notes, and late-interaction indexing f
 ## Common commands
 
 ```bash
-# Build the server (default = S3 + GCS + ONNX)
-PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume
+# Build the server (default = S3 + GCS, mock encoder). Add `onnx` for the
+# real ColBERT encoder — the ONNX path is opt-in so a vanilla build stays
+# portable on hosts where pyke's prebuilt runtime isn't published.
+PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --features onnx
 
-# Lean local build without cloud storage or the real encoder
+# Lean local build without cloud storage (mock encoder)
 PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --no-default-features
 
 # Run tests
@@ -33,13 +35,14 @@ PLUME_CONFIG=config.local.toml ./target/release/plume
 
 ## Feature flags
 
-Defaults: `storage-aws`, `storage-gcs`, `onnx`. Drop with `--no-default-features`.
+Defaults: `storage-aws`, `storage-gcs`. The ONNX encoder is opt-in (`--features onnx`) so a vanilla build stays portable on hosts where pyke's prebuilt ONNX Runtime isn't available.
 
 | Flag | Purpose | Default |
 |------|---------|---------|
 | `storage-aws` | S3 / MinIO / R2 | on |
 | `storage-gcs` | Google Cloud Storage | on |
-| `onnx` | Real ColBERT ONNX encoder (else mock) | on |
+| `onnx` | Real ColBERT ONNX encoder (else mock) | **off** |
+| `onnx-system-ort` | ONNX via runtime `dlopen` (Intel Mac) | off |
 
 ## Benchmarks
 

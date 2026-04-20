@@ -17,6 +17,11 @@ pub fn progress_enabled() -> bool {
     if std::env::var_os("PLUME_NO_PROGRESS").is_some() {
         return false;
     }
+    // De-facto standards for opting out of decorated CLI output — honored
+    // here so CI jobs and no-color shells don't get escape codes in logs.
+    if std::env::var_os("NO_COLOR").is_some() || std::env::var_os("CI").is_some() {
+        return false;
+    }
     std::io::stderr().is_terminal()
 }
 

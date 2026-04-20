@@ -181,8 +181,13 @@ impl PlumeConfig {
                 crate::error::PlumeError::Config(format!("invalid PLUME_BIND_PORT: {e}"))
             })?;
         }
+        // Treat empty strings as "unset" — CI wrappers that unconditionally
+        // export overrides would otherwise clobber the configured model with
+        // "", and `build_encoder` would silently fall back to MockEncoder.
         if let Ok(model) = std::env::var("PLUME_ENCODER_MODEL") {
-            config.encoder.model = model;
+            if !model.is_empty() {
+                config.encoder.model = model;
+            }
         }
         Ok(config)
     }

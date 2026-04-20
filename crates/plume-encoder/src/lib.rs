@@ -1,5 +1,14 @@
 mod pool;
 
+// `onnx` links pyke's prebuilt ONNX Runtime at build time; `onnx-system-ort`
+// dlopen()s an already-installed libonnxruntime at runtime. Enabling both
+// pulls in conflicting `ort` configurations, so reject the combination up
+// front with a clear error instead of a confusing link failure.
+#[cfg(all(feature = "onnx", feature = "onnx-system-ort"))]
+compile_error!(
+    "features `onnx` and `onnx-system-ort` are mutually exclusive — enable exactly one."
+);
+
 #[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
 mod onnx;
 

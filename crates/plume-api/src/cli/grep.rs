@@ -540,12 +540,17 @@ async fn sync_index(
     // so the read-phase bar has a stable total. Unchanged files skip the
     // progress tick; we'd rather hide the bar entirely than show it
     // jumping to 100% on a no-op run.
+    // mtime + size is enough to declare a file unchanged. Empty files get
+    // stored with `chunk_ids: Vec::new()` (see below), so we deliberately
+    // do *not* require `!chunk_ids.is_empty()` here — otherwise every empty
+    // fixture would re-read on each run.
     let changed: Vec<&SourceFile> = scanned
         .iter()
         .filter(|file| {
-            !manifest.files.get(&file.key).is_some_and(|p| {
-                p.mtime_nanos == file.mtime_nanos && p.size == file.size && !p.chunk_ids.is_empty()
-            })
+            !manifest
+                .files
+                .get(&file.key)
+                .is_some_and(|p| p.mtime_nanos == file.mtime_nanos && p.size == file.size)
         })
         .collect();
 
