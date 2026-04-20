@@ -81,7 +81,7 @@ PLUME_CONFIG=config.local.toml ./target/release/plume
 docker compose up
 ```
 
-This starts Plume on port 3000, MinIO on port 9000 (console on 9001), and auto-creates the `plume` bucket.
+This starts Plume on port 8787, MinIO on port 9000 (console on 9001), and auto-creates the `plume` bucket.
 The Docker build uses the `storage-aws` feature because MinIO is S3-compatible storage.
 
 ### ONNX encoder (optional)
@@ -103,6 +103,69 @@ PROTOC=$(which protoc) cargo build --release -p plume-api --bin plume --features
 # model = "models/lateon-code-edge"
 ```
 
+## CLI
+
+The `plume` binary doubles as a CLI for a running server. It picks up
+`PLUME_URL` from the environment (default `http://localhost:8787`).
+
+```bash
+# Start the server (also the default when no subcommand is given)
+plume serve
+
+# Ingest a JSONL file or a directory of .md files into a namespace
+plume ingest ./docs --namespace docs
+plume ingest ./corpus.jsonl -n code
+
+# Or point directly at an S3 / GCS bucket (requires storage-aws / storage-gcs)
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
+plume ingest s3://my-bucket/corpus -n corpus
+plume ingest s3://my-bucket/corpus -n corpus --extensions md,txt,rst
+
+# Semantic grep — local or remote
+plume grep "rate limiting" ./src
+plume grep "connection timeout" s3://my-bucket/runbooks
+
+# Query via the daemon directly
+plume search "exponential backoff" -n code -k 5
+plume search "backoff retry logic" -n code --mode semantic --json
+
+# Namespace management
+plume ns list
+plume ns create notes
+plume ns delete notes
+
+# Force a manual index rebuild (auto-index does this in the background
+# after each upsert; this is only needed for bulk-load workflows)
+plume index code
+plume index code --fts-only
+```
+
+`plume ingest <dir>` walks the directory, picks up every file matching
+`--extensions` (default `md,markdown,txt,rst,org`), and uses the relative
+path (without the extension) as the document id, so re-running overwrites
+existing documents in place. `s3://bucket/prefix` and `gs://bucket/prefix`
+URLs behave identically, with the object key (relative to the prefix)
+acting as the document id. Credentials follow the standard AWS / GCS
+resolver chain; see `plume ingest --help` for the full flag list.
+
+## Auto-indexing
+
+Every upsert schedules a background ANN + FTS rebuild. Rebuilds are
+debounced so rapid bursts coalesce into a single build per namespace.
+Tune under `[index.auto]`:
+
+```toml
+[index.auto]
+enabled = true          # set false to opt out and manage indexes manually
+threshold_docs = 1000   # rebuild once pending writes cross this
+debounce_ms = 5000      # or once writes have been idle this long
+min_docs = 256          # skip the ANN build below this corpus size
+```
+
+The explicit `POST /ns/{ns}/index` and `POST /ns/{ns}/fts-index` endpoints
+still work and are the right tool for bulk loads where the operator wants
+to control when the rebuild happens.
+
 ## API
 
 All document operations are scoped to a **namespace** (`/ns/{ns}/...`).
@@ -110,7 +173,7 @@ All document operations are scoped to a **namespace** (`/ns/{ns}/...`).
 ### Upsert documents
 
 ```bash
-curl -X POST http://localhost:3000/ns/code/upsert \
+curl -X POST http://localhost:8787/ns/code/upsert \
   -H 'Content-Type: application/json' \
   -d '{
     "rows": [
@@ -125,17 +188,17 @@ curl -X POST http://localhost:3000/ns/code/upsert \
 
 ```bash
 # Hybrid search (default: semantic + BM25 fused with RRF)
-curl -X POST http://localhost:3000/ns/code/query \
+curl -X POST http://localhost:8787/ns/code/query \
   -H 'Content-Type: application/json' \
   -d '{"query": "backoff retry logic", "k": 5}'
 
 # Semantic only (MaxSim)
-curl -X POST http://localhost:3000/ns/code/query \
+curl -X POST http://localhost:8787/ns/code/query \
   -H 'Content-Type: application/json' \
   -d '{"query": "backoff retry logic", "k": 5, "mode": "semantic"}'
 
 # Full-text only (BM25)
-curl -X POST http://localhost:3000/ns/code/query \
+curl -X POST http://localhost:8787/ns/code/query \
   -H 'Content-Type: application/json' \
   -d '{"query": "backoff retry logic", "k": 5, "mode": "fts"}'
 ```
@@ -146,26 +209,26 @@ Vector and FTS indexes are built asynchronously. Call these after bulk ingestion
 
 ```bash
 # Build IVF_PQ ANN index over the per-document `multivector` column
-curl -X POST http://localhost:3000/ns/code/index
+curl -X POST http://localhost:8787/ns/code/index
 
 # Build BM25 full-text index
-curl -X POST http://localhost:3000/ns/code/fts-index
+curl -X POST http://localhost:8787/ns/code/fts-index
 ```
 
 ### Other endpoints
 
 ```bash
 # Health check
-curl http://localhost:3000/health
+curl http://localhost:8787/health
 
 # Prometheus metrics
-curl http://localhost:3000/metrics
+curl http://localhost:8787/metrics
 
 # Warm up namespace (pull data into page cache)
-curl -X POST http://localhost:3000/ns/code/warmup
+curl -X POST http://localhost:8787/ns/code/warmup
 
 # Drop namespace
-curl -X DELETE http://localhost:3000/ns/code
+curl -X DELETE http://localhost:8787/ns/code
 ```
 
 ## Configuration
@@ -175,7 +238,7 @@ Plume loads config from the path in `PLUME_CONFIG` env var, or falls back to def
 ```toml
 [server]
 host = "0.0.0.0"
-port = 3000
+port = 8787
 
 [storage]
 # Local filesystem

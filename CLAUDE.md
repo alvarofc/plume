@@ -9,6 +9,15 @@ Rust workspace split into: `plume-core` (types/config), `plume-encoder` (ONNX or
 
 Semantic-search flow: encode query into a multi-vector → ANN candidate retrieval on LanceDB → exact ColBERT MaxSim rerank in `plume-search` → cache result. FTS (BM25) and hybrid (RRF over semantic + FTS) are also supported.
 
+## Ingest / grep source abstraction
+
+`crates/plume-api/src/cli/source.rs` is the single place that knows how to read a corpus. It resolves either a local path or an `s3://bucket/prefix` / `gs://bucket/prefix` URL via [`Source::parse`], exposes `list()` and `read_text()`, and is consumed by both `plume ingest` and `plume grep`.
+
+Two things to keep in mind when editing:
+
+- **Feature gating.** Remote sources are behind `storage-aws` / `storage-gcs`, which activate `object_store/{aws,gcp}` in addition to the LanceDB backends. A default build with `s3://...` fails fast at parse time with a build hint — do not fall through to "local path not found".
+- **Identity, not file path.** Manifests (for `plume grep`) and namespace names (`grep-{hash}`) are keyed off `Source::identity()`, not `&Path`. Local paths still hash their filesystem bytes (via `namespace_for_path`) for backward compatibility; remote sources hash the URL. When adding new source types, preserve that split so existing `.json` manifests aren't orphaned.
+
 ## LanceDB multi-vector
 
 Verified against `lancedb-0.27.2` source; use this as the source of truth for this repo.

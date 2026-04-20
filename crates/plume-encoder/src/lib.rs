@@ -12,6 +12,12 @@ pub use pool::pool_vectors;
 pub trait Encode: Send + Sync {
     fn encode_single(&self, text: &str) -> Result<MultiVector, PlumeError>;
     fn encode_batch(&self, texts: &[&str]) -> Result<Vec<MultiVector>, PlumeError>;
+    /// Human-readable identifier for observability: `mock`, or
+    /// `onnx:{model-id}`. Surfaced via `/health` so clients can warn
+    /// users that the mock encoder produces meaningless embeddings.
+    fn kind(&self) -> String {
+        "unknown".into()
+    }
 }
 
 /// Build the best available encoder for the given config.
@@ -62,6 +68,10 @@ impl MockEncoder {
 }
 
 impl Encode for MockEncoder {
+    fn kind(&self) -> String {
+        "mock".into()
+    }
+
     fn encode_single(&self, text: &str) -> Result<MultiVector, PlumeError> {
         Ok(self.encode_batch(&[text])?.into_iter().next().unwrap())
     }
@@ -99,6 +109,10 @@ impl Encode for MockEncoder {
 
 #[cfg(feature = "onnx")]
 impl Encode for onnx::Encoder {
+    fn kind(&self) -> String {
+        format!("onnx:{}", self.model_id())
+    }
+
     fn encode_single(&self, text: &str) -> Result<MultiVector, PlumeError> {
         self.encode_single(text)
     }

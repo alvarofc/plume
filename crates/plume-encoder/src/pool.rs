@@ -10,7 +10,7 @@ pub fn pool_vectors(embeddings: &Array2<f32>, factor: usize) -> Array2<f32> {
     }
 
     let (n_tokens, dim) = embeddings.dim();
-    let n_pooled = (n_tokens + factor - 1) / factor;
+    let n_pooled = n_tokens.div_ceil(factor);
     let mut pooled = Array2::zeros((n_pooled, dim));
 
     for i in 0..n_pooled {

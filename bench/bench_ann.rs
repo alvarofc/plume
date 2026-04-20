@@ -37,7 +37,16 @@ struct BenchmarkRow {
 }
 
 fn generate_documents(n: usize) -> Vec<Document> {
-    let languages = ["Rust", "Go", "TypeScript", "Python", "C++", "Java", "Zig", "Elixir"];
+    let languages = [
+        "Rust",
+        "Go",
+        "TypeScript",
+        "Python",
+        "C++",
+        "Java",
+        "Zig",
+        "Elixir",
+    ];
     let components = [
         "HTTP retry middleware",
         "LSP symbol indexer",
@@ -328,6 +337,7 @@ async fn main() -> Result<()> {
             refine_factor: None,
             ann_candidate_multiplier: 20,
             max_candidates: 10_000,
+            auto: Default::default(),
         };
 
         let index_start = Instant::now();
@@ -429,7 +439,7 @@ async fn main() -> Result<()> {
         println!("Suggested profile");
         println!("-----------------");
         println!(
-            "partitions={}, nprobes={}, candidate_multiplier={}, refine_factor={}, recall@{}={:.3}, avg_latency_ms={:.2}, p95_ms={:.2}",
+            "partitions={}, nprobes={}, candidate_multiplier={}, refine_factor={}, recall@{}={:.3} (min {:.3}), avg_latency_ms={:.2}, p95_ms={:.2}",
             best.partitions
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
@@ -440,6 +450,7 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| "none".to_string()),
             k,
             best.avg_recall_at_k,
+            best.min_recall,
             best.avg_latency_ms,
             best.p95_latency_ms,
         );

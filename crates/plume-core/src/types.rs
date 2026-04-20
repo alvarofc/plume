@@ -66,6 +66,26 @@ pub struct UpsertResponse {
     pub upserted: usize,
 }
 
+/// Delete-by-id request for `DELETE /ns/{ns}/docs`. The grep CLI uses
+/// this to prune chunks belonging to files that were removed from disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteDocsRequest {
+    pub ids: Vec<String>,
+}
+
+/// Delete-by-id response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteDocsResponse {
+    pub deleted: usize,
+    pub namespace: String,
+}
+
+/// Namespace listing response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespacesResponse {
+    pub namespaces: Vec<String>,
+}
+
 /// Index build response (async operation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexResponse {

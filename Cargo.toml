@@ -68,6 +68,17 @@ chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 tempfile = "3"
 
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+walkdir = "2"
+globset = "0.4"
+regex = "1"
+# object_store is already pulled in by lancedb; re-pin here so the API crate can
+# use it directly for ingest/grep sources behind the cloud feature flags.
+object_store = { version = "0.12" }
+bytes = "1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

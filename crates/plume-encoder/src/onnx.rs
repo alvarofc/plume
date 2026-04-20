@@ -20,6 +20,7 @@ pub struct Encoder {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
     pool_factor: usize,
+    model_id: String,
 }
 
 impl Encoder {
@@ -61,6 +62,7 @@ impl Encoder {
             session: Mutex::new(session),
             tokenizer,
             pool_factor: 2,
+            model_id: model_dir.display().to_string(),
         })
     }
 
@@ -68,7 +70,17 @@ impl Encoder {
     pub fn with_config(model_dir: &Path, config: &EncoderConfig) -> Result<Self, PlumeError> {
         let mut encoder = Self::from_directory(model_dir)?;
         encoder.pool_factor = config.pool_factor;
+        // Prefer the config's model string (typically the HF id) over the
+        // local path when available, so `/health` surfaces a stable id.
+        if !config.model.is_empty() {
+            encoder.model_id = config.model.clone();
+        }
         Ok(encoder)
+    }
+
+    /// Stable identifier for the loaded model, for observability.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
     }
 
     /// Encode a single text into a multi-vector representation.

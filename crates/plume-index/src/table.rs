@@ -30,9 +30,7 @@ impl NamespaceTable {
     /// (permissions, object-store, corruption, …) surface as `Index`.
     pub async fn open(conn: &Connection, name: &str) -> Result<Self, PlumeError> {
         let table = conn.open_table(name).execute().await.map_err(|e| match e {
-            lancedb::Error::TableNotFound { .. } => {
-                PlumeError::NamespaceNotFound(name.to_string())
-            }
+            lancedb::Error::TableNotFound { .. } => PlumeError::NamespaceNotFound(name.to_string()),
             other => PlumeError::Index(format!("failed to open table {name}: {other}")),
         })?;
 
@@ -168,7 +166,13 @@ impl NamespaceTable {
             .column("multivector")
             .distance_type(DistanceType::Cosine)
             .nprobes(nprobes.max(1))
-            .select(Select::columns(&["id", "text", "metadata", "multivector", "_distance"]));
+            .select(Select::columns(&[
+                "id",
+                "text",
+                "metadata",
+                "multivector",
+                "_distance",
+            ]));
 
         for token in iter {
             query = query
@@ -265,6 +269,34 @@ impl NamespaceTable {
             .count_rows(None)
             .await
             .map_err(|e| PlumeError::Index(format!("count failed: {e}")))
+    }
+
+    /// Delete rows whose `id` is in `ids`. Large id lists are batched to
+    /// keep the SQL `IN (...)` predicate a reasonable size. Returns the
+    /// number of ids requested (LanceDB doesn't surface an affected-rows
+    /// count, so we treat missing ids as idempotent no-ops).
+    pub async fn delete_by_ids(&self, ids: &[String]) -> Result<usize, PlumeError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let table = self.table.write().await;
+        // LanceDB's SQL delete doesn't have a prepared-statement API, so
+        // we build a parameterized-style expression by escaping single
+        // quotes. Namespace ids are validated upstream but chunk ids can
+        // include arbitrary relpath fragments, so escape defensively.
+        const CHUNK: usize = 512;
+        for batch in ids.chunks(CHUNK) {
+            let quoted: Vec<String> = batch
+                .iter()
+                .map(|id| format!("'{}'", id.replace('\'', "''")))
+                .collect();
+            let predicate = format!("id IN ({})", quoted.join(","));
+            table
+                .delete(&predicate)
+                .await
+                .map_err(|e| PlumeError::Index(format!("delete failed: {e}")))?;
+        }
+        Ok(ids.len())
     }
 }
 
