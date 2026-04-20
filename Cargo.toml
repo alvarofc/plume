@@ -19,7 +19,7 @@ rust-version = "1.75"
 [workspace.dependencies]
 # Internal crates
 plume-core = { path = "crates/plume-core" }
-plume-encoder = { path = "crates/plume-encoder" }
+plume-encoder = { path = "crates/plume-encoder", default-features = false }
 plume-cache = { path = "crates/plume-cache" }
 plume-index = { path = "crates/plume-index" }
 plume-search = { path = "crates/plume-search" }
@@ -50,7 +50,10 @@ arrow-buffer = "57"
 foyer = { version = "0.22", features = ["serde"] }
 
 # ONNX
-ort = "2.0.0-rc.12"
+# Default-features-off so leaf crates can pick between `download-binaries`
+# (default `onnx`) and `load-dynamic` (needed on platforms without pyke
+# prebuilts, e.g. x86_64 macOS).
+ort = { version = "2.0.0-rc.12", default-features = false }
 tokenizers = "0.21"
 ndarray = "0.17"
 
@@ -70,7 +73,7 @@ tempfile = "3"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 walkdir = "2"
 globset = "0.4"
 regex = "1"
@@ -78,6 +81,7 @@ regex = "1"
 # use it directly for ingest/grep sources behind the cloud feature flags.
 object_store = { version = "0.12" }
 bytes = "1"
+indicatif = "0.17"
 
 [profile.release]
 lto = "thin"

@@ -12,10 +12,11 @@ pub const DEFAULT_URL: &str = "http://localhost:8787";
 /// Fail fast when the server is down. 5s is generous for localhost and
 /// still quick enough that a typo'd host doesn't hang the CLI.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Cap for any single request. Ingest batches and index builds can be
-/// slow, but 5 minutes is the outer bound before we'd rather error out
-/// than wait silently.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// Cap for any single request. Ingest batches that encode a fresh corpus
+/// with a real ONNX model on CPU can take many minutes (the daemon will
+/// happily keep encoding even after the client hangs up), so the cap has
+/// to accommodate the slowest realistic upsert, not the median.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
 
 pub struct Client {
     base_url: String,

@@ -130,13 +130,46 @@ impl Source {
                     Ok(b) => b,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                     Err(e) => {
-                        return Err(anyhow::Error::from(e)
-                            .context(format!("read {}", path.display())))
+                        return Err(
+                            anyhow::Error::from(e).context(format!("read {}", path.display()))
+                        )
                     }
                 };
                 Ok(decode_text(&bytes))
             }
             Self::Remote(r) => r.read_text(key).await,
+        }
+    }
+
+    /// Stream a local file into the destination under `key` without
+    /// materializing it in RAM. `plume push` uses this so multi-GiB
+    /// artifacts don't OOM the host. Only valid on directory-rooted
+    /// sources — a single-file `Source::Local` would produce nonsense
+    /// paths via `root.join(key)` and is rejected.
+    pub async fn write_file(&self, key: &str, src: &Path) -> Result<()> {
+        match self {
+            Self::Local { root } => {
+                if root.is_file() {
+                    bail!(
+                        "cannot write into {} — destination must be a directory, not a single file",
+                        root.display()
+                    );
+                }
+                let path = root.join(key);
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .with_context(|| format!("create parent dir for {}", path.display()))?;
+                }
+                // `tokio::fs::copy` delegates to `std::fs::copy` on a
+                // blocking thread — platform-native, streams under the
+                // hood, no user-space buffer.
+                tokio::fs::copy(src, &path)
+                    .await
+                    .with_context(|| format!("copy {} → {}", src.display(), path.display()))?;
+                Ok(())
+            }
+            Self::Remote(r) => r.write_file(key, src).await,
         }
     }
 }
@@ -494,6 +527,39 @@ impl RemoteSource {
             .with_context(|| format!("read body {key}"))?;
         Ok(decode_text(&bytes))
     }
+
+    async fn write_file(&self, key: &str, src: &Path) -> Result<()> {
+        use object_store::buffered::BufWriter;
+        use tokio::io::AsyncWriteExt;
+
+        let path = self.object_path(key);
+        let mut file = tokio::fs::File::open(src)
+            .await
+            .with_context(|| format!("open {}", src.display()))?;
+        // `BufWriter` transparently uses multipart for large objects and
+        // regular PUT for small ones — no user-space buffering of the
+        // whole file.
+        let mut writer = BufWriter::new(self.store.clone(), path);
+        tokio::io::copy(&mut file, &mut writer)
+            .await
+            .with_context(|| format!("stream {key}"))?;
+        writer
+            .shutdown()
+            .await
+            .with_context(|| format!("finalize upload of {key}"))?;
+        Ok(())
+    }
+
+    fn object_path(&self, key: &str) -> object_store::path::Path {
+        use object_store::path::Path as OsPath;
+        let trimmed = self.prefix.trim_matches('/');
+        let full = if trimmed.is_empty() {
+            key.trim_start_matches('/').to_string()
+        } else {
+            format!("{trimmed}/{}", key.trim_start_matches('/'))
+        };
+        OsPath::from(full)
+    }
 }
 
 #[cfg(any(feature = "storage-aws", feature = "storage-gcs"))]
@@ -670,14 +736,20 @@ mod tests {
             .await
             .unwrap();
         store
-            .put(&OsPath::from("other/c.md"), b"outside prefix".to_vec().into())
+            .put(
+                &OsPath::from("other/c.md"),
+                b"outside prefix".to_vec().into(),
+            )
             .await
             .unwrap();
 
         let remote = RemoteSource::new_in_memory("bucket", "docs", store);
         let source = Source::Remote(remote);
 
-        let files = source.list(&Filter::with_exts(["md", "txt"])).await.unwrap();
+        let files = source
+            .list(&Filter::with_exts(["md", "txt"]))
+            .await
+            .unwrap();
         let mut keys: Vec<String> = files.into_iter().map(|f| f.key).collect();
         keys.sort();
         assert_eq!(keys, vec!["a.md", "nested/b.txt"]);

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arrow_array::{Array, RecordBatch, RecordBatchIterator};
 use futures::StreamExt;
 use lancedb::index::scalar::FullTextSearchQuery;
-use lancedb::index::{vector::IvfPqIndexBuilder, Index};
+use lancedb::index::{vector::IvfPqIndexBuilder, Index, IndexType};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::DistanceType;
 use lancedb::{Connection, Table};
@@ -246,6 +246,23 @@ impl NamespaceTable {
         Ok(indices
             .iter()
             .any(|index| index.columns.iter().any(|column| column == "multivector")))
+    }
+
+    /// Whether a BM25 (INVERTED) index has been built over the `text`
+    /// column yet. LanceDB's `full_text_search` errors out when this is
+    /// absent, so search code must check before issuing the query (or be
+    /// ready to degrade to semantic-only).
+    pub async fn has_fts_index(&self) -> Result<bool, PlumeError> {
+        let table = self.table.read().await;
+        let indices = table
+            .list_indices()
+            .await
+            .map_err(|e| PlumeError::Index(format!("failed to list indices: {e}")))?;
+
+        Ok(indices.iter().any(|index| {
+            index.index_type == IndexType::FTS
+                && index.columns.iter().any(|column| column == "text")
+        }))
     }
 
     /// Build a BM25 full-text search index on the text column.

@@ -4,13 +4,24 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = []
-# Propagate cloud backend support to the API binary only when explicitly requested.
-# `storage-aws` / `storage-gcs` flip on both the LanceDB object-store backend
-# *and* the matching `object_store` provider in the CLI, so `plume ingest` and
-# `plume grep` can read directly from s3:// / gs:// URLs.
+# The default `plume` binary ships with S3 + GCS support but keeps the
+# mock encoder unless the caller explicitly opts into ONNX. That preserves
+# a working default build on hosts where `ort`'s prebuilt runtime is not
+# available, while still keeping cloud dogfooding zero-config.
+default = ["storage-aws", "storage-gcs"]
+# Propagate cloud backend support to the API binary. `storage-aws` /
+# `storage-gcs` flip on both the LanceDB object-store backend *and* the
+# matching `object_store` provider in the CLI so `plume ingest`, `plume grep`,
+# and `plume push` can read/write s3:// / gs:// URLs directly.
 storage-aws = ["plume-index/storage-aws", "object_store/aws"]
 storage-gcs = ["plume-index/storage-gcs", "object_store/gcp"]
+# Forward the encoder's real-ONNX path so the binary picks up a configured
+# local model rather than silently falling back to the mock encoder.
+onnx = ["plume-encoder/onnx"]
+# Intel-Mac / system-ORT alternative: link-free runtime dlopen of an
+# already-installed libonnxruntime. Pass `--no-default-features` and then
+# add this flag (usually with storage-aws and/or storage-gcs).
+onnx-system-ort = ["plume-encoder/onnx-system-ort"]
 
 [[bin]]
 name = "plume"
@@ -18,7 +29,7 @@ path = "src/main.rs"
 
 [dependencies]
 plume-core = { workspace = true }
-plume-encoder = { workspace = true }
+plume-encoder = { workspace = true, default-features = false }
 plume-index = { workspace = true }
 plume-cache = { workspace = true }
 plume-search = { workspace = true }
@@ -40,6 +51,7 @@ regex = { workspace = true }
 object_store = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
+indicatif = { workspace = true }
 url = "2"
 chrono = { workspace = true }
 

@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::client::{Client, DEFAULT_URL};
+use super::progress::{new_spinner, new_steps};
 use super::source::{Filter, Source, SourceFile};
 
 #[derive(Parser)]
@@ -280,12 +281,7 @@ fn collect_queries(args: &Args) -> Result<Vec<String>> {
     if let Some(q) = args.query.clone().filter(|q| !q.is_empty()) {
         queries.push(q);
     }
-    queries.extend(
-        args.extra_queries
-            .iter()
-            .filter(|q| !q.is_empty())
-            .cloned(),
-    );
+    queries.extend(args.extra_queries.iter().filter(|q| !q.is_empty()).cloned());
     if queries.is_empty() {
         bail!("a query is required (positional or via -e)");
     }
@@ -413,6 +409,28 @@ async fn ensure_daemon(url: &str, no_daemon: bool, verbose: bool) -> Result<()> 
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
+
+    // The daemon runs with `current_dir(&data_dir)`, so a relative
+    // `PLUME_CONFIG` from the caller's shell would resolve against the
+    // plume data dir and quietly miss. Canonicalize to absolute so the
+    // child loads the same config file the CLI user referenced.
+    if let Ok(cfg) = std::env::var("PLUME_CONFIG") {
+        let cfg_path = PathBuf::from(&cfg);
+        match fs::canonicalize(&cfg_path) {
+            Ok(abs) => {
+                cmd.env("PLUME_CONFIG", abs);
+            }
+            Err(e) => {
+                bail!(
+                    "PLUME_CONFIG={} not found relative to {}: {e}",
+                    cfg,
+                    std::env::current_dir()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_else(|_| "?".into()),
+                );
+            }
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -497,7 +515,11 @@ async fn sync_index(
 ) -> Result<()> {
     let filters = FileFilters::from_args(args)?;
     let mut manifest = load_manifest(manifest_path);
+
+    let scan_spinner = new_spinner("scanning");
+    scan_spinner.set_message(source.display());
     let scanned = scan_source(source, &filters).await?;
+    scan_spinner.finish_and_clear();
     let scanned_keys: HashSet<String> = scanned.iter().map(|f| f.key.clone()).collect();
 
     // Files present in the manifest but not in the source → prune.
@@ -514,19 +536,43 @@ async fn sync_index(
     let mut new_chunks: Vec<Document> = Vec::new();
     let mut new_entries: HashMap<String, FileEntry> = HashMap::new();
 
-    for file in &scanned {
-        let prev = manifest.files.get(&file.key);
-        let unchanged = prev.is_some_and(|p| {
-            p.mtime_nanos == file.mtime_nanos && p.size == file.size && !p.chunk_ids.is_empty()
-        });
-        if unchanged {
-            continue;
+    // Work out how many files we'll actually read before touching the wire
+    // so the read-phase bar has a stable total. Unchanged files skip the
+    // progress tick; we'd rather hide the bar entirely than show it
+    // jumping to 100% on a no-op run.
+    // mtime + size is enough to declare a file unchanged. Empty files get
+    // stored with `chunk_ids: Vec::new()` (see below), so we deliberately
+    // do *not* require `!chunk_ids.is_empty()` here — otherwise every empty
+    // fixture would re-read on each run.
+    let changed: Vec<&SourceFile> = scanned
+        .iter()
+        .filter(|file| {
+            !manifest
+                .files
+                .get(&file.key)
+                .is_some_and(|p| p.mtime_nanos == file.mtime_nanos && p.size == file.size)
+        })
+        .collect();
+
+    let read_bar = if changed.is_empty() {
+        None
+    } else {
+        Some(new_steps(changed.len() as u64, "reading"))
+    };
+
+    for file in &changed {
+        if let Some(ref bar) = read_bar {
+            bar.set_message(file.key.clone());
         }
+        let prev = manifest.files.get(&file.key);
         let Some(text) = source
             .read_text(&file.key)
             .await
             .with_context(|| format!("read {}", file.key))?
         else {
+            if let Some(ref bar) = read_bar {
+                bar.inc(1);
+            }
             continue;
         };
         let chunks = chunk_file(&file.key, &text);
@@ -543,6 +589,9 @@ async fn sync_index(
                     chunk_ids: Vec::new(),
                 },
             );
+            if let Some(ref bar) = read_bar {
+                bar.inc(1);
+            }
             continue;
         }
 
@@ -571,6 +620,13 @@ async fn sync_index(
                 chunk_ids,
             },
         );
+        if let Some(ref bar) = read_bar {
+            bar.inc(1);
+        }
+    }
+
+    if let Some(bar) = read_bar {
+        bar.finish_and_clear();
     }
 
     if to_delete_ids.is_empty() && new_chunks.is_empty() {
@@ -594,6 +650,7 @@ async fn sync_index(
                 to_delete_rels.len() + new_entries.len()
             );
         }
+        let prune_bar = new_steps(to_delete_ids.len() as u64, "pruning");
         for batch in to_delete_ids.chunks(MAX_ROWS_PER_UPSERT) {
             let req = DeleteDocsRequest {
                 ids: batch.to_vec(),
@@ -602,15 +659,18 @@ async fn sync_index(
                 .delete_with_body(&format!("/ns/{namespace}/docs"), &req)
                 .await
                 .with_context(|| format!("delete batch from namespace {namespace}"))?;
+            prune_bar.inc(batch.len() as u64);
         }
+        prune_bar.finish_and_clear();
     }
 
     if !new_chunks.is_empty() {
-        eprintln!(
-            "plume: indexing {} chunk(s) from {} changed file(s)",
-            new_chunks.len(),
-            new_entries.len()
-        );
+        // Encoding on the daemon side is the slow part (ONNX on CPU), so
+        // the bar is the user's only feedback that work is progressing.
+        // Label it "encoding" rather than "uploading" — that's where the
+        // wall-clock actually goes.
+        let upload_bar = new_steps(new_chunks.len() as u64, "encoding");
+        upload_bar.set_message(format!("{} file(s)", new_entries.len()));
         for batch in new_chunks.chunks(MAX_ROWS_PER_UPSERT) {
             let req = UpsertRequest {
                 rows: batch.to_vec(),
@@ -619,7 +679,9 @@ async fn sync_index(
                 .post_json(&format!("/ns/{namespace}/upsert"), &req)
                 .await
                 .with_context(|| format!("upsert batch to namespace {namespace}"))?;
+            upload_bar.inc(batch.len() as u64);
         }
+        upload_bar.finish_and_clear();
     }
 
     // Commit manifest changes: drop removed rels, insert new entries.

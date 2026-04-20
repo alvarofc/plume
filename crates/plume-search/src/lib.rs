@@ -67,10 +67,22 @@ impl SearchEngine {
             SearchMode::Semantic => self.semantic_search(table, query_vectors, k).await?,
             SearchMode::Fts => table.fts_search(query_text, k).await?,
             SearchMode::Hybrid => {
-                let (semantic, fts) = tokio::try_join!(
-                    self.semantic_search(table, query_vectors, k * 2),
-                    table.fts_search(query_text, k * 2),
-                )?;
+                // `plume grep`'s auto-ingest path writes rows before the
+                // background auto-indexer has built the FTS (INVERTED) index.
+                // LanceDB errors `full_text_search` out entirely in that
+                // window, so in hybrid mode we check first and skip FTS
+                // cleanly when it isn't ready — degrading to semantic-only
+                // keeps the query returning results instead of 500-ing.
+                let fts_ready = self.fts_index_ready(table).await;
+                let fts_fut = async {
+                    if fts_ready {
+                        table.fts_search(query_text, k * 2).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                };
+                let (semantic, fts) =
+                    tokio::try_join!(self.semantic_search(table, query_vectors, k * 2), fts_fut,)?;
                 rrf_fusion(&semantic, &fts, k)
             }
         };
@@ -82,6 +94,23 @@ impl SearchEngine {
             results,
             cache_hit: false,
         })
+    }
+
+    /// Whether the namespace has a LanceDB INVERTED (FTS) index built on
+    /// the `text` column. Returns `false` on `list_indices` errors so the
+    /// caller degrades instead of 500-ing on a transient metadata hiccup.
+    async fn fts_index_ready(&self, table: &NamespaceTable) -> bool {
+        match table.has_fts_index().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    namespace = %table.name,
+                    error = %e,
+                    "FTS index check failed; skipping FTS leg of hybrid search"
+                );
+                false
+            }
+        }
     }
 
     /// ColBERT-style semantic search: ANN candidate retrieval, then exact MaxSim re-rank.
