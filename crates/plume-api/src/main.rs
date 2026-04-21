@@ -44,13 +44,26 @@ enum Command {
     Clear(cli::clear::Args),
     /// Download and manage encoder models (HuggingFace ONNX).
     Model(cli::model::Args),
+    /// Emit a shell completion script: `plume completions zsh > ~/.zfunc/_plume`.
+    Completions(cli::completions::Args),
 }
 
 /// Subcommand names we recognize. Anything else in argv[1] falls through
 /// to implicit `grep`, so `plume "auth token" src/` works without typing
 /// `grep`.
 const KNOWN_SUBCOMMANDS: &[&str] = &[
-    "serve", "grep", "ingest", "push", "search", "ns", "index", "status", "clear", "model", "help",
+    "serve",
+    "grep",
+    "ingest",
+    "push",
+    "search",
+    "ns",
+    "index",
+    "status",
+    "clear",
+    "model",
+    "completions",
+    "help",
 ];
 
 /// argv[1] values clap handles natively; don't rewrite these into `grep`.
@@ -91,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Status(args) => cli::status::run(args).await,
         Command::Clear(args) => cli::clear::run(args).await,
         Command::Model(args) => cli::model::run(args).await,
+        Command::Completions(args) => cli::completions::run::<Cli>(args),
     }
 }
 

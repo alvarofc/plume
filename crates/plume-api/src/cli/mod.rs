@@ -4,6 +4,7 @@
 
 pub mod clear;
 pub mod client;
+pub mod completions;
 pub mod grep;
 pub mod index;
 pub mod ingest;

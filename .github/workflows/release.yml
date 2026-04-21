@@ -1,0 +1,147 @@
+name: release
+
+# Build prebuilt `plume` binaries on every version tag push so users never
+# need to install Rust + protoc just to try it. Artifacts are attached to
+# the corresponding GitHub Release; `install.sh` pulls the right one.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to release as (e.g. v0.1.1). If empty, uses the triggering ref."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            features: onnx,storage-aws,storage-gcs
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            # Intel macOS: pyke does not publish prebuilt ort for this
+            # target, so use the dynamic-loading variant and ship the
+            # system libonnxruntime in the tarball. macos-13 was retired
+            # 2025-12-04, so we use the macos-15-intel runner image.
+            features: onnx-system-ort,storage-aws,storage-gcs
+            system_ort: true
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            features: onnx,storage-aws,storage-gcs
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            features: onnx,storage-aws,storage-gcs
+    steps:
+      # Third-party actions are pinned to full commit SHAs (with the tag
+      # as a trailing comment) so a compromised tag push can't silently
+      # swap the code we run. Bump by re-resolving the tag.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          echo "PROTOC=$(which protoc)" >> "$GITHUB_ENV"
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf
+          echo "PROTOC=$(brew --prefix protobuf)/bin/protoc" >> "$GITHUB_ENV"
+
+      - name: Install onnxruntime (system-ort targets)
+        if: matrix.system_ort
+        run: brew install onnxruntime
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        run: |
+          cargo build --release \
+            --target ${{ matrix.target }} \
+            -p plume-api --bin plume \
+            --no-default-features \
+            --features ${{ matrix.features }}
+
+      - name: Stage tarball
+        id: stage
+        run: |
+          set -euo pipefail
+          # Prefer the workflow_dispatch input over the triggering ref so
+          # manual re-releases from a non-tag branch still stamp the right
+          # version. Then hard-fail on anything that isn't a vX.Y.Z tag —
+          # otherwise we'd publish a release named after a branch.
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="${GITHUB_REF_NAME}"; fi
+          # Strict vX.Y.Z with optional `-prerelease` suffix (e.g. v0.1.0-rc1).
+          # No trailing slop — without `$` anchor, things like `v1.2.3-foo bar`
+          # would pass and we'd publish a release named after junk.
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "Refusing to release: '$TAG' is not a vX.Y.Z[-prerelease] tag" >&2
+            exit 1
+          fi
+          STAGE="plume-${TAG}-${{ matrix.target }}"
+          mkdir -p "dist/${STAGE}"
+          cp "target/${{ matrix.target }}/release/plume" "dist/${STAGE}/"
+          cp README.md LICENSE "dist/${STAGE}/"
+          # system-ort builds: bundle the dylib alongside the binary. The
+          # installer sets ORT_DYLIB_PATH to the bundled copy via a wrapper
+          # script so `ort`'s load-dynamic path finds it.
+          if [[ "${{ matrix.system_ort }}" == "true" ]]; then
+            ORT_PREFIX="$(brew --prefix onnxruntime)"
+            cp "${ORT_PREFIX}/lib/libonnxruntime.dylib" "dist/${STAGE}/"
+          fi
+          cd dist
+          tar -czf "${STAGE}.tar.gz" "${STAGE}"
+          shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+          echo "archive=dist/${STAGE}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/${STAGE}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plume-${{ matrix.target }}
+          path: |
+            ${{ steps.stage.outputs.archive }}
+            ${{ steps.stage.outputs.checksum }}
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          # Tagged push → the pushed tag; manual dispatch → the input tag.
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.sha256
