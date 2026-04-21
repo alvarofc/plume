@@ -107,23 +107,36 @@ async fn pull(args: PullArgs) -> Result<()> {
         Some(explicit) => explicit,
         None => plume_data_dir()?.join("models").join(&name),
     };
+    ensure_model(&name, &repo, &target, args.force).await?;
+    print_config_hint(&name, &target);
+    Ok(())
+}
 
-    tokio::fs::create_dir_all(&target)
+/// Download `repo`'s REQUIRED_FILES into `target_dir`. Idempotent: returns
+/// early when every required file is present and non-empty (unless `force`).
+/// Exposed so other CLI paths (e.g. `plume grep`'s auto-daemon-spawn) can
+/// make sure a model is on disk before starting the encoder.
+pub(super) async fn ensure_model(
+    name: &str,
+    repo: &str,
+    target_dir: &Path,
+    force: bool,
+) -> Result<()> {
+    tokio::fs::create_dir_all(target_dir)
         .await
-        .with_context(|| format!("create {}", target.display()))?;
+        .with_context(|| format!("create {}", target_dir.display()))?;
 
-    if !args.force && model_is_complete(&target) {
+    if !force && model_is_complete(target_dir) {
         eprintln!(
             "plume: model {name} already present at {} (re-run with --force to refetch)",
-            target.display()
+            target_dir.display()
         );
-        print_config_hint(&name, &target);
         return Ok(());
     }
 
     eprintln!(
         "plume: downloading {repo} → {} ({} file(s))",
-        target.display(),
+        target_dir.display(),
         REQUIRED_FILES.len()
     );
 
@@ -133,17 +146,48 @@ async fn pull(args: PullArgs) -> Result<()> {
         .context("build HTTP client")?;
 
     for file in REQUIRED_FILES {
-        let dest = target.join(file);
-        if !args.force && dest.exists() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        let dest = target_dir.join(file);
+        if !force && dest.exists() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
             eprintln!("  skip  {file} (already present)");
             continue;
         }
-        download_file(&http, &repo, file, &dest).await?;
+        download_file(&http, repo, file, &dest).await?;
     }
 
     eprintln!("plume: model ready.");
-    print_config_hint(&name, &target);
     Ok(())
+}
+
+/// Default model alias + repo (first entry in BUILTIN_MODELS). The local
+/// target directory is derived so `plume grep` can pre-stage the model
+/// before spawning its daemon — keeping download progress visible on the
+/// caller's terminal rather than buried in daemon.log.
+///
+/// Only compiled into the binary when ONNX is enabled — mock-only builds
+/// never auto-pull anyway.
+#[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
+pub(crate) fn default_local_model() -> Result<(String, String, PathBuf)> {
+    let (alias, repo) = BUILTIN_MODELS[0];
+    let target = plume_data_dir()?.join("models").join(alias);
+    Ok((alias.to_string(), repo.to_string(), target))
+}
+
+/// True when every required model file already exists on disk.
+/// Used by callers that want to skip the auto-pull fast path.
+#[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
+pub(crate) fn is_model_ready(dir: &Path) -> bool {
+    model_is_complete(dir)
+}
+
+/// Download the default model into its canonical local path if it isn't
+/// already complete. Idempotent; returns the resolved directory regardless.
+#[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
+pub(crate) async fn ensure_default_model() -> Result<PathBuf> {
+    let (name, repo, target) = default_local_model()?;
+    if !model_is_complete(&target) {
+        ensure_model(&name, &repo, &target, false).await?;
+    }
+    Ok(target)
 }
 
 /// Resolve either a registered alias or a bare HF repo id. Bare ids

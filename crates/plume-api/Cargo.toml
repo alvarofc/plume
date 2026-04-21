@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# The default `plume` binary ships with S3 + GCS support but keeps the
-# mock encoder unless the caller explicitly opts into ONNX. That preserves
-# a working default build on hosts where `ort`'s prebuilt runtime is not
-# available, while still keeping cloud dogfooding zero-config.
+# Defaults ship cloud backends but leave ONNX opt-in: pyke's prebuilt ORT
+# doesn't cover every host (notably x86_64 macOS), so a default
+# `cargo build` must stay portable. End users who want a zero-flag
+# install should grab a prebuilt binary (see README), which is built per
+# target with the matching ONNX feature already on.
 default = ["storage-aws", "storage-gcs"]
 # Propagate cloud backend support to the API binary. `storage-aws` /
 # `storage-gcs` flip on both the LanceDB object-store backend *and* the
@@ -44,6 +45,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 clap = { workspace = true }
+clap_complete = "4"
 reqwest = { workspace = true }
 walkdir = { workspace = true }
 globset = { workspace = true }

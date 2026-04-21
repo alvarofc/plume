@@ -350,8 +350,9 @@ async fn warn_on_mock_encoder(client: &Client) {
     if kind == "mock" || kind.starts_with("mock:") {
         eprintln!(
             "plume: warning: server is using the MOCK encoder — embeddings are deterministic \
-             hashes, not semantic vectors. Set `[encoder] model = \"/path/to/onnx\"` in \
-             config.toml and restart the daemon for real search quality."
+             hashes, not semantic vectors. Run `plume model pull` then restart the daemon \
+             (or rebuild with `--features onnx` if this is a mock-only build) for real \
+             search quality."
         );
     }
 }
@@ -401,6 +402,12 @@ async fn ensure_daemon(url: &str, no_daemon: bool, verbose: bool) -> Result<()> 
         eprintln!("plume: data dir = {}", data_dir.display());
     }
 
+    // Only now that we've committed to spawning: stage the default encoder
+    // model on the user's terminal (progress is visible live). The child
+    // inherits the path via PLUME_ENCODER_MODEL. Skipped when the user has
+    // their own PLUME_CONFIG / PLUME_ENCODER_MODEL.
+    let auto_model_path = maybe_prepare_default_model(verbose).await?;
+
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("serve")
         .current_dir(&data_dir)
@@ -409,6 +416,10 @@ async fn ensure_daemon(url: &str, no_daemon: bool, verbose: bool) -> Result<()> 
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
+
+    if let Some(model_dir) = auto_model_path.as_ref() {
+        cmd.env("PLUME_ENCODER_MODEL", model_dir);
+    }
 
     // The daemon runs with `current_dir(&data_dir)`, so a relative
     // `PLUME_CONFIG` from the caller's shell would resolve against the
@@ -449,6 +460,36 @@ async fn ensure_daemon(url: &str, no_daemon: bool, verbose: bool) -> Result<()> 
         "plume daemon failed to come up within 15s (see logs at {})",
         log_path.display()
     );
+}
+
+/// Stage the default encoder model on disk before spawning the daemon, so
+/// the caller sees download progress live instead of tailing daemon.log.
+/// Skips when the user has set their own config or encoder-model env var;
+/// returns the local model directory on success so the caller can forward
+/// it to the spawned daemon via `PLUME_ENCODER_MODEL`.
+///
+/// No-op on mock-only builds (neither `onnx` nor `onnx-system-ort`): a
+/// 70MB ONNX download is wasted bytes when the runtime would fall back to
+/// MockEncoder regardless.
+#[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
+async fn maybe_prepare_default_model(verbose: bool) -> Result<Option<PathBuf>> {
+    if std::env::var("PLUME_CONFIG").is_ok() || std::env::var("PLUME_ENCODER_MODEL").is_ok() {
+        return Ok(None);
+    }
+    let (_, _, target) = super::model::default_local_model()?;
+    if super::model::is_model_ready(&target) {
+        if verbose {
+            eprintln!("plume: reusing cached model at {}", target.display());
+        }
+        return Ok(Some(target));
+    }
+    let resolved = super::model::ensure_default_model().await?;
+    Ok(Some(resolved))
+}
+
+#[cfg(not(any(feature = "onnx", feature = "onnx-system-ort")))]
+async fn maybe_prepare_default_model(_verbose: bool) -> Result<Option<PathBuf>> {
+    Ok(None)
 }
 
 /// Short-timeout health probe used to decide whether to spawn a daemon.

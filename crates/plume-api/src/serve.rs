@@ -23,8 +23,17 @@ pub async fn run() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = PlumeConfig::from_env_or_default()?;
+    let mut config = PlumeConfig::from_env_or_default()?;
     info!("starting Plume v{}", env!("CARGO_PKG_VERSION"));
+
+    // Auto-resolve the default encoder model: if nothing is configured
+    // (still the shipped HF repo id) and no override env var is set,
+    // download it into the canonical local dir so `plume serve` out of
+    // the box lights up the real ONNX encoder instead of silently
+    // falling back to the mock.
+    if let Some(local) = maybe_autoresolve_model(&config).await? {
+        config.encoder.model = local;
+    }
 
     let index_manager = Arc::new(IndexManager::connect(&config.storage).await?);
     let cache = Arc::new(SearchCache::new(&config.cache).await?);
@@ -70,4 +79,40 @@ pub async fn run() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// When the configured encoder model is still the shipped default HF repo
+/// id (i.e. not a filesystem path the user wired up themselves), download
+/// it into the canonical local dir and return the path. Returns `None`
+/// when the user has supplied their own path or when the binary was built
+/// without ONNX support — in both cases `build_encoder` already does the
+/// right thing.
+#[cfg(any(feature = "onnx", feature = "onnx-system-ort"))]
+async fn maybe_autoresolve_model(config: &PlumeConfig) -> anyhow::Result<Option<String>> {
+    use std::path::Path;
+
+    // Any value that looks like a filesystem path is the user's choice —
+    // leave it alone so pointing at a bespoke model keeps working.
+    let configured = &config.encoder.model;
+    if Path::new(configured).is_absolute() || configured.starts_with('.') {
+        return Ok(None);
+    }
+
+    let (_, default_repo, default_target) = crate::cli::model::default_local_model()?;
+    // Only auto-pull the bundled default. Surprising a user who typed
+    // `model = "org/custom"` with a mystery download would be worse than
+    // letting `build_encoder` fall back and log a warning.
+    if configured != &default_repo {
+        return Ok(None);
+    }
+
+    if !crate::cli::model::is_model_ready(&default_target) {
+        crate::cli::model::ensure_default_model().await?;
+    }
+    Ok(Some(default_target.to_string_lossy().into_owned()))
+}
+
+#[cfg(not(any(feature = "onnx", feature = "onnx-system-ort")))]
+async fn maybe_autoresolve_model(_config: &PlumeConfig) -> anyhow::Result<Option<String>> {
+    Ok(None)
 }
