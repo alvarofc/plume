@@ -20,6 +20,7 @@ VERSION="${PLUME_VERSION:-latest}"
 BIN_DIR_DEFAULT="${HOME}/.local/bin"
 BIN_DIR=""
 QUIET=0
+SKIP_VERIFY="${PLUME_SKIP_VERIFY:-0}"
 
 say()  { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
 warn() { printf '%s\n' "plume-install: warning: $*" >&2; }
@@ -29,15 +30,16 @@ usage() {
     cat <<EOF
 Plume installer
 
-Usage: install.sh [--version TAG] [--bin-dir DIR] [--repo OWNER/NAME] [--quiet]
+Usage: install.sh [--version TAG] [--bin-dir DIR] [--repo OWNER/NAME] [--quiet] [--skip-verify]
 
   --version TAG     Release tag to install (default: latest).
   --bin-dir DIR     Where to drop the \`plume\` binary (default: ~/.local/bin).
   --repo OWNER/NAME GitHub repo to pull from (default: $REPO).
   --quiet           Suppress progress output.
+  --skip-verify     Skip SHA-256 checksum verification (not recommended).
   -h, --help        Show this help.
 
-Env vars: PLUME_REPO, PLUME_VERSION.
+Env vars: PLUME_REPO, PLUME_VERSION, PLUME_SKIP_VERIFY.
 EOF
 }
 
@@ -45,11 +47,12 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version) VERSION="$2"; shift 2 ;;
-        --bin-dir) BIN_DIR="$2"; shift 2 ;;
-        --repo)    REPO="$2"; shift 2 ;;
-        --quiet)   QUIET=1; shift ;;
-        -h|--help) usage; exit 0 ;;
+        --version)     VERSION="$2"; shift 2 ;;
+        --bin-dir)     BIN_DIR="$2"; shift 2 ;;
+        --repo)        REPO="$2"; shift 2 ;;
+        --quiet)       QUIET=1; shift ;;
+        --skip-verify) SKIP_VERIFY=1; shift ;;
+        -h|--help)     usage; exit 0 ;;
         *) die "unknown arg: $1 (see --help)" ;;
     esac
 done
@@ -80,8 +83,10 @@ if command -v shasum >/dev/null 2>&1; then
     SHA="shasum -a 256"
 elif command -v sha256sum >/dev/null 2>&1; then
     SHA="sha256sum"
-else
-    warn "no shasum/sha256sum available; skipping checksum verification"
+fi
+
+if [ "$SKIP_VERIFY" -ne 1 ] && [ -z "$SHA" ]; then
+    die "no shasum/sha256sum available; install one or re-run with --skip-verify"
 fi
 
 # --- target detection -------------------------------------------------------
@@ -139,14 +144,15 @@ trap cleanup EXIT
 say "plume-install: downloading archive"
 $DOWNLOADER "$URL" > "$TMP/$ARCHIVE" || die "download failed: $URL"
 
-if [ -n "$SHA" ]; then
+if [ "$SKIP_VERIFY" -eq 1 ]; then
+    warn "skipping checksum verification (--skip-verify / PLUME_SKIP_VERIFY=1)"
+else
     say "plume-install: verifying checksum"
     $DOWNLOADER "$SUM_URL" > "$TMP/$ARCHIVE.sha256" \
-        || warn "could not fetch checksum; skipping verification"
-    if [ -s "$TMP/$ARCHIVE.sha256" ]; then
-        (cd "$TMP" && $SHA -c "$ARCHIVE.sha256") \
-            || die "checksum verification failed"
-    fi
+        || die "could not fetch checksum sidecar at $SUM_URL"
+    [ -s "$TMP/$ARCHIVE.sha256" ] || die "checksum sidecar is empty at $SUM_URL"
+    (cd "$TMP" && $SHA -c "$ARCHIVE.sha256") \
+        || die "checksum verification failed"
 fi
 
 # --- extract and install ---------------------------------------------------
@@ -157,18 +163,41 @@ STAGE_DIR="$TMP/plume-${VERSION}-${TARGET}"
 [ -x "$STAGE_DIR/plume" ] || die "archive did not contain plume binary at $STAGE_DIR/plume"
 
 mkdir -p "$BIN_DIR"
-mv "$STAGE_DIR/plume" "$BIN_DIR/plume"
-chmod +x "$BIN_DIR/plume"
 
-# Intel-mac builds ship a bundled libonnxruntime. Keep it next to the
-# binary: `ort`'s default load-dynamic path checks the executable's
-# directory for a relative `libonnxruntime.dylib`.
+# Intel-mac builds ship a bundled libonnxruntime. `ort`'s load-dynamic
+# path does NOT auto-discover a dylib next to the executable — the user
+# has to point `ORT_DYLIB_PATH` at it. Make that plug-and-play: stash
+# the real binary as `plume-bin` and put a tiny launcher at `plume` that
+# sets the env var. Everything else (plain macOS/Linux) just drops the
+# binary straight in.
 if [ -f "$STAGE_DIR/libonnxruntime.dylib" ]; then
-    mv "$STAGE_DIR/libonnxruntime.dylib" "$BIN_DIR/libonnxruntime.dylib"
-    say "plume-install: installed libonnxruntime → $BIN_DIR/libonnxruntime.dylib"
+    LIB_DIR="$BIN_DIR/../lib/plume"
+    mkdir -p "$LIB_DIR"
+    # Resolve to an absolute path so the wrapper works no matter where
+    # it's invoked from. `cd` + `pwd -P` is the POSIX way; `realpath`
+    # isn't available on every mac.
+    LIB_ABS="$(cd "$LIB_DIR" && pwd -P)"
+    mv "$STAGE_DIR/libonnxruntime.dylib" "$LIB_ABS/libonnxruntime.dylib"
+    mv "$STAGE_DIR/plume" "$BIN_DIR/plume-bin"
+    chmod +x "$BIN_DIR/plume-bin"
+    cat > "$BIN_DIR/plume" <<WRAPPER
+#!/bin/sh
+# Launcher for Intel-mac prebuilt: point ort's load-dynamic path at the
+# bundled libonnxruntime. Users can override by exporting ORT_DYLIB_PATH
+# themselves before invoking plume.
+: "\${ORT_DYLIB_PATH:=$LIB_ABS/libonnxruntime.dylib}"
+export ORT_DYLIB_PATH
+exec "$(cd "$BIN_DIR" && pwd -P)/plume-bin" "\$@"
+WRAPPER
+    chmod +x "$BIN_DIR/plume"
+    say "plume-install: installed libonnxruntime → $LIB_ABS/libonnxruntime.dylib"
+    say "plume-install: installed launcher    → $BIN_DIR/plume"
+    say "plume-install: installed binary      → $BIN_DIR/plume-bin"
+else
+    mv "$STAGE_DIR/plume" "$BIN_DIR/plume"
+    chmod +x "$BIN_DIR/plume"
+    say "plume-install: installed to $BIN_DIR/plume"
 fi
-
-say "plume-install: installed to $BIN_DIR/plume"
 
 # Warn if $BIN_DIR isn't on PATH — otherwise `plume` won't resolve and the
 # user will think install failed. Point them at the conventional fix.

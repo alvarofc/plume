@@ -28,10 +28,11 @@ jobs:
             runner: macos-14
             features: onnx,storage-aws,storage-gcs
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
             # Intel macOS: pyke does not publish prebuilt ort for this
             # target, so use the dynamic-loading variant and ship the
-            # system libonnxruntime in the tarball.
+            # system libonnxruntime in the tarball. macos-13 was retired
+            # 2025-12-04, so we use the macos-15-intel runner image.
             features: onnx-system-ort,storage-aws,storage-gcs
             system_ort: true
           - target: x86_64-unknown-linux-gnu
@@ -82,16 +83,26 @@ jobs:
         id: stage
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          # Prefer the workflow_dispatch input over the triggering ref so
+          # manual re-releases from a non-tag branch still stamp the right
+          # version. Then hard-fail on anything that isn't a vX.Y.Z tag —
+          # otherwise we'd publish a release named after a branch.
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="${GITHUB_REF_NAME}"; fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Refusing to release: '$TAG' is not a vX.Y.Z tag" >&2
+            exit 1
+          fi
           STAGE="plume-${TAG}-${{ matrix.target }}"
           mkdir -p "dist/${STAGE}"
           cp "target/${{ matrix.target }}/release/plume" "dist/${STAGE}/"
-          cp README.md LICENSE "dist/${STAGE}/" 2>/dev/null || true
-          # system-ort builds: bundle the dylib in the same directory as the
-          # binary. `ort`'s default dynamic-loader path checks next to the
-          # executable when `ORT_DYLIB_PATH` is unset.
+          cp README.md LICENSE "dist/${STAGE}/"
+          # system-ort builds: bundle the dylib alongside the binary. The
+          # installer sets ORT_DYLIB_PATH to the bundled copy via a wrapper
+          # script so `ort`'s load-dynamic path finds it.
           if [[ "${{ matrix.system_ort }}" == "true" ]]; then
-            cp /usr/local/opt/onnxruntime/lib/libonnxruntime.dylib "dist/${STAGE}/" || true
+            ORT_PREFIX="$(brew --prefix onnxruntime)"
+            cp "${ORT_PREFIX}/lib/libonnxruntime.dylib" "dist/${STAGE}/"
           fi
           cd dist
           tar -czf "${STAGE}.tar.gz" "${STAGE}"
