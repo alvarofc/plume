@@ -243,12 +243,15 @@ pub(crate) fn split_bucket_and_prefix(raw: &str) -> Result<(String, String)> {
 #[cfg(feature = "storage-aws")]
 fn parse_s3(rest: &str) -> Result<Source> {
     let (bucket, prefix) = split_bucket_and_prefix(rest).context("parse s3:// URL")?;
-    let store = remote::build_s3(&bucket)?;
+    // Deliberately lazy: `plume status s3://...` / `plume clear s3://...`
+    // only need the URL for identity, not a live client. Resolving the
+    // AWS credential chain (which may hit IMDS with a timeout) during
+    // `parse` would punish offline workflows too.
     Ok(Source::Remote(RemoteSource {
         scheme: RemoteScheme::S3,
         bucket,
         prefix,
-        store,
+        store: tokio::sync::OnceCell::new(),
     }))
 }
 
@@ -263,12 +266,11 @@ fn parse_s3(_rest: &str) -> Result<Source> {
 #[cfg(feature = "storage-gcs")]
 fn parse_gcs(rest: &str) -> Result<Source> {
     let (bucket, prefix) = split_bucket_and_prefix(rest).context("parse gs:// URL")?;
-    let store = remote::build_gcs(&bucket)?;
     Ok(Source::Remote(RemoteSource {
         scheme: RemoteScheme::Gcs,
         bucket,
         prefix,
-        store,
+        store: tokio::sync::OnceCell::new(),
     }))
 }
 
@@ -420,7 +422,9 @@ pub struct RemoteSource {
     scheme: RemoteScheme,
     pub bucket: String,
     pub prefix: String,
-    store: std::sync::Arc<dyn object_store::ObjectStore>,
+    // Lazy so `status` / `clear` don't trigger AWS credential resolution
+    // (which may stall on IMDS). Tests pre-populate via `new_in_memory`.
+    store: tokio::sync::OnceCell<std::sync::Arc<dyn object_store::ObjectStore>>,
 }
 
 impl RemoteSource {
@@ -430,11 +434,14 @@ impl RemoteSource {
         prefix: impl Into<String>,
         store: std::sync::Arc<dyn object_store::ObjectStore>,
     ) -> Self {
+        let cell = tokio::sync::OnceCell::new();
+        // Infallible: a freshly constructed OnceCell is empty.
+        let _ = cell.set(store);
         Self {
             scheme: RemoteScheme::Memory,
             bucket: bucket.into(),
             prefix: prefix.into(),
-            store,
+            store: cell,
         }
     }
 
@@ -442,9 +449,37 @@ impl RemoteSource {
         format!("{}://{}/{}", self.scheme.prefix(), self.bucket, self.prefix)
     }
 
+    /// Resolve (and cache) the backing `ObjectStore`. First call on a
+    /// real remote source kicks off credential resolution.
+    async fn store(&self) -> Result<&std::sync::Arc<dyn object_store::ObjectStore>> {
+        self.store
+            .get_or_try_init(|| async {
+                match self.scheme {
+                    #[cfg(feature = "storage-aws")]
+                    RemoteScheme::S3 => remote::build_s3(&self.bucket).await,
+                    #[cfg(feature = "storage-gcs")]
+                    RemoteScheme::Gcs => remote::build_gcs(&self.bucket),
+                    #[cfg(not(feature = "storage-aws"))]
+                    RemoteScheme::S3 => bail!(
+                        "s3:// sources require the `storage-aws` Cargo feature"
+                    ),
+                    #[cfg(not(feature = "storage-gcs"))]
+                    RemoteScheme::Gcs => bail!(
+                        "gs:// sources require the `storage-gcs` Cargo feature"
+                    ),
+                    #[cfg(test)]
+                    RemoteScheme::Memory => {
+                        bail!("in-memory test store was not pre-populated")
+                    }
+                }
+            })
+            .await
+    }
+
     async fn list(&self, filter: &Filter) -> Result<Vec<SourceFile>> {
         use futures::StreamExt;
         use object_store::path::Path as OsPath;
+        let store = self.store().await?;
 
         // Treat the prefix like a directory regardless of whether the
         // user wrote `s3://bucket/notes` or `s3://bucket/notes/`. The
@@ -465,7 +500,7 @@ impl RemoteSource {
             format!("{trimmed}/")
         };
 
-        let mut stream = self.store.list(prefix);
+        let mut stream = store.list(prefix);
         let mut out = Vec::new();
         while let Some(meta) = stream.next().await {
             let meta = meta.context("list objects")?;
@@ -509,6 +544,7 @@ impl RemoteSource {
 
     async fn read_text(&self, key: &str) -> Result<Option<String>> {
         use object_store::path::Path as OsPath;
+        let store = self.store().await?;
 
         let trimmed = self.prefix.trim_matches('/');
         let full = if trimmed.is_empty() {
@@ -517,8 +553,7 @@ impl RemoteSource {
             format!("{trimmed}/{}", key.trim_start_matches('/'))
         };
         let path = OsPath::from(full);
-        let bytes = self
-            .store
+        let bytes = store
             .get(&path)
             .await
             .with_context(|| format!("get {key}"))?
@@ -532,6 +567,7 @@ impl RemoteSource {
         use object_store::buffered::BufWriter;
         use tokio::io::AsyncWriteExt;
 
+        let store = self.store().await?.clone();
         let path = self.object_path(key);
         let mut file = tokio::fs::File::open(src)
             .await
@@ -539,7 +575,7 @@ impl RemoteSource {
         // `BufWriter` transparently uses multipart for large objects and
         // regular PUT for small ones — no user-space buffering of the
         // whole file.
-        let mut writer = BufWriter::new(self.store.clone(), path);
+        let mut writer = BufWriter::new(store, path);
         tokio::io::copy(&mut file, &mut writer)
             .await
             .with_context(|| format!("stream {key}"))?;
@@ -568,22 +604,65 @@ mod remote {
     use std::sync::Arc;
 
     #[cfg(feature = "storage-aws")]
-    pub(super) fn build_s3(bucket: &str) -> Result<Arc<dyn object_store::ObjectStore>> {
+    pub(super) async fn build_s3(bucket: &str) -> Result<Arc<dyn object_store::ObjectStore>> {
+        use aws_config::BehaviorVersion;
+        use aws_credential_types::provider::ProvideCredentials;
         use object_store::aws::AmazonS3Builder;
-        let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
+
+        // Walk the full AWS SDK default chain instead of `from_env()`:
+        // env vars → shared config/credentials (AWS_PROFILE) → SSO token
+        // cache → ECS task role → IMDS. This is what fixes the
+        // "S3 creds are env-only" limitation the README used to document.
+        let sdk = aws_config::defaults(BehaviorVersion::latest()).load().await;
+
+        let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+
+        // Region: prefer the SDK's resolved region (profile > env >
+        // IMDS), fall back to raw env so MinIO setups without a profile
+        // still work.
+        let region = sdk
+            .region()
+            .map(|r| r.as_ref().to_string())
+            .or_else(|| std::env::var("AWS_REGION").ok())
+            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok());
+        if let Some(r) = region {
+            builder = builder.with_region(r);
+        }
+
+        // Snapshot creds at build time. SSO tokens are valid for hours,
+        // which is plenty for a CLI session. For long-lived daemons this
+        // means a refresh requires a restart — acceptable trade-off until
+        // someone reports it.
+        if let Some(provider) = sdk.credentials_provider() {
+            match provider.provide_credentials().await {
+                Ok(creds) => {
+                    builder = builder
+                        .with_access_key_id(creds.access_key_id())
+                        .with_secret_access_key(creds.secret_access_key());
+                    if let Some(tok) = creds.session_token() {
+                        builder = builder.with_token(tok);
+                    }
+                }
+                Err(e) => {
+                    // No creds in the chain is fine for public/MinIO-anonymous
+                    // buckets; real auth failures surface on the first request.
+                    tracing::debug!("AWS credential chain yielded no creds: {e}");
+                }
+            }
+        }
+
+        // Endpoint override is env-only and is what lets `plume` talk to
+        // MinIO / LocalStack / R2 without shipping a separate builder.
         if let Ok(endpoint) =
             std::env::var("AWS_ENDPOINT").or_else(|_| std::env::var("AWS_ENDPOINT_URL"))
         {
             builder = builder.with_endpoint(endpoint).with_allow_http(true);
         }
-        if let Ok(region) =
-            std::env::var("AWS_REGION").or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-        {
-            builder = builder.with_region(region);
-        }
-        let s3 = builder
-            .build()
-            .context("build S3 client (check AWS_REGION and credentials)")?;
+
+        let s3 = builder.build().context(
+            "build S3 client (check AWS region/credentials — \
+             for SSO run `aws sso login`, for a profile set `AWS_PROFILE`)",
+        )?;
         Ok(Arc::new(s3))
     }
 

@@ -92,11 +92,7 @@ plume completions <zsh|bash|fish|powershell|elvish>
 
 Environment: `PLUME_URL` (default `http://localhost:8787`), `PLUME_CONFIG` (TOML path), `AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`.
 
-S3 credentials are read from the environment only (not `~/.aws/credentials`). On AWS SSO:
-
-```bash
-eval "$(aws configure export-credentials --profile <you> --format env)"
-```
+S3 credentials resolve through the standard AWS default chain — env vars, `AWS_PROFILE` + `~/.aws/{credentials,config}`, SSO cache, ECS task role, IMDS. Pick a profile with `AWS_PROFILE=<name> plume grep …`; refresh SSO with `aws sso login --profile <name>`.
 
 ## HTTP API
 

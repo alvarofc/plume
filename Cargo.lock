@@ -4977,6 +4977,8 @@ name = "plume-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-credential-types",
  "axum",
  "bytes",
  "chrono",
