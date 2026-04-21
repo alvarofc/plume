@@ -20,7 +20,14 @@ VERSION="${PLUME_VERSION:-latest}"
 BIN_DIR_DEFAULT="${HOME}/.local/bin"
 BIN_DIR=""
 QUIET=0
-SKIP_VERIFY="${PLUME_SKIP_VERIFY:-0}"
+
+# Accept the usual shell truthy spellings for PLUME_SKIP_VERIFY; anything
+# else is off. We compare numerically later (-eq/-ne), so letting a
+# non-numeric value through would crash under `set -e`.
+case "$(printf '%s' "${PLUME_SKIP_VERIFY:-0}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) SKIP_VERIFY=1 ;;
+    *)             SKIP_VERIFY=0 ;;
+esac
 
 say()  { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
 warn() { printf '%s\n' "plume-install: warning: $*" >&2; }
@@ -45,11 +52,16 @@ EOF
 
 # --- arg parsing ------------------------------------------------------------
 
+# `set -u` would crash on `install.sh --version` (no value) when the case
+# body touches `$2`. Guard `$#` first.
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version)     VERSION="$2"; shift 2 ;;
-        --bin-dir)     BIN_DIR="$2"; shift 2 ;;
-        --repo)        REPO="$2"; shift 2 ;;
+        --version)     [ $# -ge 2 ] || die "--version requires a value (see --help)"
+                       VERSION="$2"; shift 2 ;;
+        --bin-dir)     [ $# -ge 2 ] || die "--bin-dir requires a value (see --help)"
+                       BIN_DIR="$2"; shift 2 ;;
+        --repo)        [ $# -ge 2 ] || die "--repo requires a value (see --help)"
+                       REPO="$2"; shift 2 ;;
         --quiet)       QUIET=1; shift ;;
         --skip-verify) SKIP_VERIFY=1; shift ;;
         -h|--help)     usage; exit 0 ;;
