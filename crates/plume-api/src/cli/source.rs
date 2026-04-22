@@ -633,7 +633,14 @@ mod remote {
         // which is plenty for a CLI session. For long-lived daemons this
         // means a refresh requires a restart — acceptable trade-off until
         // someone reports it.
+        //
+        // Only `CredentialsNotLoaded` is a soft failure: the chain came up
+        // empty, so fall through to anonymous (public buckets / MinIO).
+        // Every other variant — expired SSO, bad profile, IMDS timeout,
+        // STS 5xx — would otherwise surface as a confusing S3 403 on the
+        // first request, so propagate with an actionable hint.
         if let Some(provider) = sdk.credentials_provider() {
+            use aws_credential_types::provider::error::CredentialsError;
             match provider.provide_credentials().await {
                 Ok(creds) => {
                     builder = builder
@@ -643,10 +650,17 @@ mod remote {
                         builder = builder.with_token(tok);
                     }
                 }
+                Err(CredentialsError::CredentialsNotLoaded(_)) => {
+                    tracing::debug!(
+                        "AWS credential chain yielded no creds; continuing anonymously"
+                    );
+                }
                 Err(e) => {
-                    // No creds in the chain is fine for public/MinIO-anonymous
-                    // buckets; real auth failures surface on the first request.
-                    tracing::debug!("AWS credential chain yielded no creds: {e}");
+                    return Err(anyhow::Error::new(e).context(
+                        "resolve AWS credentials — for SSO run `aws sso login`, \
+                         for a profile set `AWS_PROFILE` to one defined in \
+                         `~/.aws/credentials` or `~/.aws/config`",
+                    ));
                 }
             }
         }
