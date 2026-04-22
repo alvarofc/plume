@@ -13,8 +13,16 @@ default = ["storage-aws", "storage-gcs"]
 # Propagate cloud backend support to the API binary. `storage-aws` /
 # `storage-gcs` flip on both the LanceDB object-store backend *and* the
 # matching `object_store` provider in the CLI so `plume ingest`, `plume grep`,
-# and `plume push` can read/write s3:// / gs:// URLs directly.
-storage-aws = ["plume-index/storage-aws", "object_store/aws"]
+# and `plume push` can read/write s3:// / gs:// URLs directly. `storage-aws`
+# also pulls in `aws-config` so the S3 client resolves credentials through
+# the full AWS default chain (env, AWS_PROFILE, SSO cache, ECS, IMDS) rather
+# than env-only like `AmazonS3Builder::from_env` does on its own.
+storage-aws = [
+    "plume-index/storage-aws",
+    "object_store/aws",
+    "dep:aws-config",
+    "dep:aws-credential-types",
+]
 storage-gcs = ["plume-index/storage-gcs", "object_store/gcp"]
 # Forward the encoder's real-ONNX path so the binary picks up a configured
 # local model rather than silently falling back to the mock encoder.
@@ -56,6 +64,11 @@ futures = { workspace = true }
 indicatif = { workspace = true }
 url = "2"
 chrono = { workspace = true }
+# Optional — gated on `storage-aws`. aws-config walks the AWS SDK's default
+# credential chain; aws-credential-types gives us the ProvideCredentials
+# trait to snapshot resolved creds into object_store's AmazonS3Builder.
+aws-config = { version = "1", optional = true }
+aws-credential-types = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
