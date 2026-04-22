@@ -460,13 +460,13 @@ impl RemoteSource {
                     #[cfg(feature = "storage-gcs")]
                     RemoteScheme::Gcs => remote::build_gcs(&self.bucket),
                     #[cfg(not(feature = "storage-aws"))]
-                    RemoteScheme::S3 => bail!(
-                        "s3:// sources require the `storage-aws` Cargo feature"
-                    ),
+                    RemoteScheme::S3 => {
+                        bail!("s3:// sources require the `storage-aws` Cargo feature")
+                    }
                     #[cfg(not(feature = "storage-gcs"))]
-                    RemoteScheme::Gcs => bail!(
-                        "gs:// sources require the `storage-gcs` Cargo feature"
-                    ),
+                    RemoteScheme::Gcs => {
+                        bail!("gs:// sources require the `storage-gcs` Cargo feature")
+                    }
                     #[cfg(test)]
                     RemoteScheme::Memory => {
                         bail!("in-memory test store was not pre-populated")
