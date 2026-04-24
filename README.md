@@ -1,6 +1,8 @@
 # Plume
 
-Semantic `grep` for your code, docs, and buckets. Point it at a directory or an `s3://` / `gs://` URL, ask in plain English, and get back the chunks that actually match your intent.
+`grep` stops at your filesystem. Plume searches local files and buckets.
+
+Plume is fast semantic search for code and docs in local folders, `s3://` buckets, and `gs://` buckets. Use one CLI, point it at a path or object-store URL, and get back the chunks that actually match what you mean.
 
 ```bash
 plume grep "retry with exponential backoff" ./src
@@ -8,11 +10,34 @@ plume grep "connection pool leak"           s3://prod-runbooks
 plume grep "where do we refresh auth tokens" gs://docs/engineering
 ```
 
-No separate index step, no separate query service — `plume grep` spawns a local daemon on first use, indexes incrementally (only changed files re-embed), and subsequent queries are sub-second.
+No separate index step, no query service to stand up. `plume grep` starts a local daemon on first use, indexes incrementally, only re-embeds what changed, and keeps repeated queries fast.
+
+## What It Is Good For
+
+Use Plume when:
+
+- You know the behavior you want, but not the exact symbol or filename.
+- The answer might live in local code, runbooks, or text sitting in S3/GCS.
+- `grep` is returning nothing useful because the wording does not match.
+- You want one search workflow across your filesystem and object storage.
+
+Stick with `rg` when:
+
+- You know the exact string, symbol, or filename.
+- You need strict literal or regex matching.
+- You want the fastest possible exact-text search.
 
 ## Why
 
-Regex finds what you typed. Classic single-vector embeddings find the vibe but blur away precision on short, code-like text. Plume uses **ColBERT-style multi-vector retrieval** — one embedding per token, scored with late-interaction MaxSim — so `"backoff retry logic"` can match `retry_with_jitter` and `sleep(backoff).await`, not just documents that happen to contain the word *retry*.
+Regex is great when you know the text. It breaks down when you only know the idea.
+
+Plume is built for questions like:
+
+- "Where do we retry requests with jitter?"
+- "How do we refresh auth tokens?"
+- "Where is rate limiting enforced?"
+
+Classic single-vector embeddings find the vibe but blur away precision on short, code-like text. Plume uses **ColBERT-style multi-vector retrieval** — one embedding per token, scored with late-interaction MaxSim — so `"backoff retry logic"` can match `retry_with_jitter` and `sleep(backoff).await`, not just documents that happen to contain the word *retry*.
 
 Under the hood it pairs four ideas that usually live in four different systems:
 
@@ -33,14 +58,26 @@ curl -sSf https://raw.githubusercontent.com/alvarofc/plume/main/install.sh | sh
 
 If no Release has been published yet, use the source build path below instead.
 
-Then:
+Then run your first query:
 
 ```bash
 plume grep "rate limiting middleware" ./src
 plume grep "idempotency key reuse"   s3://my-bucket/code
 ```
 
-The first run auto-downloads the ColBERT encoder (~70MB) into `$XDG_DATA_HOME/plume/models` and spawns a local daemon. Subsequent runs are sub-second.
+Example result shape:
+
+```text
+crates/plume-api/src/routes.rs:187
+  .route("/query", post(query_namespace))
+  ...
+  // rate-limit query traffic before fanout
+
+crates/plume-api/src/main.rs:92
+  let limiter = tower::limit::RateLimitLayer::new(...)
+```
+
+The first run auto-downloads the ColBERT encoder (~70MB) into `$XDG_DATA_HOME/plume/models` and starts a local daemon. After that, repeated queries are typically sub-second, including against bucket-backed corpora.
 
 ### Tab completions
 
@@ -201,6 +238,8 @@ Plume stands on the shoulders of two projects worth reading if you want to go de
 
 - Operator setup, toolchain notes, and CI commands: [`AGENTS.md`](AGENTS.md)
 - Late-interaction internals, LanceDB multi-vector notes, recall tuning: [`CLAUDE.md`](CLAUDE.md)
+- Contributor workflow and review expectations: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Security reporting policy: [`SECURITY.md`](SECURITY.md)
 
 ## License
 
